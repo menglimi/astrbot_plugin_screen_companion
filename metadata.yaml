@@ -1,5 +1,5 @@
 name: 我会一直看着你
-author: AstrBotAssistant
+author: xingyuan
 description: 智能屏幕观察插件，通过截图分析和环境感知，为用户提供个性化的互动体验。支持自动监控、手动触发、环境感知、日记功能、自定义监控任务和麦克风监听等多种功能。
 version: 1.5.0
-repo: https://github.com/your_username/astrbot_plugin_screen_companion
+repo: https://github.com/menglimi/astrbot_plugin_screen_companion
