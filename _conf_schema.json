@@ -5,6 +5,7 @@
     "hint": "开启后，机器人将根据设定的时间间隔截取屏幕并进行主动点评。",
     "default": false
   },
+
   "interaction_mode": {
     "description": "互动模式",
     "type": "string",
@@ -16,36 +17,42 @@
       "中度互动模式",
       "高频互动模式",
       "静默模式"
-    ]
+    ],
+    "condition": {
+      "enabled": true
+    }
   },
   "check_interval": {
     "description": "检查间隔",
     "type": "int",
     "hint": "每隔多少秒进行一次触发判定，最小值为10秒。",
     "default": 300,
-    "obvious_hint": true
+    "obvious_hint": true,
+    "condition": {
+      "enabled": true,
+      "interaction_mode": "自定义"
+    }
   },
   "trigger_probability": {
     "description": "触发概率",
     "type": "int",
     "hint": "每次判定时触发的概率（0-100），例如50表示有50%的概率触发。",
     "default": 30,
-    "obvious_hint": true
+    "obvious_hint": true,
+    "condition": {
+      "enabled": true,
+      "interaction_mode": "自定义"
+    }
   },
   "active_time_range": {
     "description": "活跃时间段",
     "type": "string",
     "hint": "设定自动窥屏的时间段，格式为'H:MM-HH:MM'，例如'09:00-22:00'。支持跨天设置，例如'22:00-06:00'表示从晚上10点到次日早上6点。留空表示全天活跃。",
     "default": "",
-    "obvious_hint": true
-  },
-  "system_prompt": {
-    "description": "机器人的人格设定",
-    "type": "text",
-    "hint": "定义机器人如何观察你的屏幕。例如：'你是一个毒舌的健身教练，如果看到我在摸鱼看视频，请严厉地吐槽我；如果我在写代码，请鼓励我。'",
-    "default": "你是一个幽默、敏锐的屏幕观察伴侣。你会根据用户当前的屏幕截图，以朋友的口吻对用户的行为进行简短的吐槽、互动或提供建议。字数请控制在50字以内。",
-    "editor_mode": true,
-    "editor_language": "text"
+    "obvious_hint": true,
+    "condition": {
+      "enabled": true
+    }
   },
   "watch_mode": {
     "description": "观察模式",
@@ -55,7 +62,10 @@
     "options": [
       "观看",
       "偷看"
-    ]
+    ],
+    "condition": {
+      "enabled": true
+    }
   },
   "capture_mode": {
     "description": "截图区域",
@@ -65,164 +75,329 @@
     "options": [
       "fullscreen",
       "active_window"
-    ]
+    ],
+    "condition": {
+      "enabled": true
+    }
   },
-  "image_quality": {
-    "description": "截图压缩质量",
+  "bot_vision_quality": {
+    "description": "Bot 近视程度",
     "type": "int",
-    "hint": "设置 1-100 之间的整数。较低的质量可以减少网络流量消耗和 AI 响应延迟。",
-    "default": 70
+    "hint": "值越高看得越清楚，建议保持在80+",
+    "default": 85,
+    "min": 1,
+    "max": 100,
+    "condition": {
+      "enabled": true
+    }
   },
   "image_prompt": {
     "description": "图像识别提示词",
     "type": "text",
     "hint": "自定义LLM识别图像时的提示词，以获得更好的识别效果。",
-    "default": "请详细分析这张屏幕截图，识别出：1. 屏幕上显示的内容和界面元素 2. 用户可能正在进行的操作或任务 3. 屏幕上的关键信息和细节。请提供详细的分析结果，以便后续基于此进行针对性互动。",
+    "default": "请详细分析这张屏幕截图，捕捉以下细节：1. 屏幕上的具体应用程序、窗口和界面元素 2. 用户正在进行的具体操作和任务 3. 屏幕上的详细文字、图片、图标等内容 4. 用户的操作习惯和行为模式 5. 任何可能被忽略的细节信息。请提供详细的分析结果，重点突出用户当前活动的具体细节，以便我能准确了解用户正在做什么。",
     "editor_mode": true,
-    "editor_language": "text"
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
   },
   "use_external_vision": {
     "description": "使用外接视觉API",
     "type": "bool",
     "hint": "开启后，使用外接API进行视觉模型调用，而不是Astrbot自带的视觉模型。",
-    "default": true
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
   },
   "vision_api_url": {
     "description": "视觉API地址",
     "type": "string",
     "hint": "外接视觉API的URL地址，例如：https://api.qhaigc.net/v1/chat/completions。",
-    "default": ""
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
   },
   "vision_api_key": {
     "description": "视觉API密钥",
     "type": "string",
     "hint": "外接视觉API的密钥。",
-    "default": ""
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
   },
   "vision_api_model": {
     "description": "视觉API模型",
     "type": "string",
     "hint": "外接视觉API使用的模型名称。",
-    "default": ""
-  },
-  "weather_api_key": {
-    "description": "天气API密钥",
-    "type": "string",
-    "hint": "用于获取天气信息的API密钥，例如OpenWeatherMap的API密钥。留空则不启用天气感知功能。",
-    "default": ""
-  },
-  "weather_city": {
-    "description": "城市名称",
-    "type": "string",
-    "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
-    "default": ""
-  },
-  "enable_diary": {
-    "description": "启用日记功能",
-    "type": "bool",
-    "hint": "开启后，bot会在每天设定的时间总结当天通过屏幕看到的内容，并生成风格化的日记。",
-    "default": false
-  },
-  "diary_time": {
-    "description": "日记生成时间",
-    "type": "string",
-    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'22:00'。",
-    "default": "22:00"
-  },
-  "diary_storage": {
-    "description": "日记存储路径",
-    "type": "string",
-    "hint": "日记文件的存储路径，留空则使用默认路径。",
-    "default": ""
-  },
-  "diary_reference_days": {
-    "description": "日记参考天数",
-    "type": "int",
-    "hint": "生成日记时参考前几天的日记内容，0表示不参考，1表示参考前1天，以此类推。",
-    "default": 0
-  },
-  "diary_auto_recall": {
-    "description": "是否自动撤回日记",
-    "type": "bool",
-    "hint": "开启后，发送日记消息后会在设定时间后自动撤回。",
-    "default": false
-  },
-  "diary_recall_time": {
-    "description": "日记自动撤回时间（秒）",
-    "type": "int",
-    "hint": "发送日记消息后多少秒自动撤回，默认30秒。",
-    "default": 30
-  },
-  "diary_response_prompt": {
-    "description": "日记被偷看回应提示词",
-    "type": "text",
-    "hint": "当用户查看日记时，用于生成相应回应的提示词。",
-    "default": "你发现用户居然偷看了你写的用户观察日记，给予相应回应。",
-    "editor_mode": true,
-    "editor_language": "text"
-  },
-  "admin_qq": {
-    "description": "管理员QQ号",
-    "type": "string",
-    "hint": "填写管理员的QQ号，用于接收主动消息和通知。",
-    "default": ""
-  },
-  "proactive_target": {
-    "description": "主动消息推送目标",
-    "type": "string",
-    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:private_message:123456",
-    "default": ""
-  },
-  "save_local": {
-    "description": "是否在本地保留截图",
-    "type": "bool",
-    "hint": "如果开启，最近一次截图将保存在 data 目录中。关闭则在发送给 AI 后立即删除，以节省空间。",
-    "default": false
-  },
-  "custom_tasks": {
-    "description": "自定义监控任务",
-    "type": "text",
-    "hint": "设置特定时间的监控任务，格式为每行一个任务：时间 提示词。例如：02:00 这么晚了还在工作，快去休息吧！",
     "default": "",
-    "editor_mode": true,
-    "editor_language": "text"
-  },
-  "enable_mic_monitor": {
-    "description": "启用麦克风监听",
-    "type": "bool",
-    "hint": "开启后，插件会监听麦克风音量，当音量超过阈值时触发截屏回复。",
-    "default": false
-  },
-  "mic_threshold": {
-    "description": "麦克风音量阈值",
-    "type": "int",
-    "hint": "麦克风音量超过此值时触发截屏回复，范围 0-100。",
-    "default": 60
-  },
-  "mic_check_interval": {
-    "description": "麦克风检查间隔",
-    "type": "int",
-    "hint": "每隔多少秒检查一次麦克风音量，最小值为 1 秒。",
-    "default": 5
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
   },
   "user_preferences": {
     "description": "用户偏好设置",
     "type": "text",
     "hint": "设置不同场景的互动风格，格式为每行一个场景：场景名称 互动风格描述。例如：编程 严厉的导师风格，催促用户专注编码。",
-    "default": "",
+    "default": "游戏 专业的游戏高手，指导玩家提升水平",
     "editor_mode": true,
-    "editor_language": "text"
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "start_end_mode": {
+    "description": "开始/结束回复模式",
+    "type": "string",
+    "hint": "选择使用预设回复还是 LLM 生成回复",
+    "default": "llm",
+    "options": ["preset", "llm"],
+    "condition": {
+      "enabled": true
+    }
+  },
+  "start_preset": {
+    "description": "开始预设回复",
+    "type": "string",
+    "hint": "使用预设模式时的开始回复内容",
+    "default": "知道啦~我会时不时过来看一眼的",
+    "condition": {
+      "enabled": true,
+      "start_end_mode": "preset"
+    }
+  },
+  "end_preset": {
+    "description": "结束预设回复",
+    "type": "string",
+    "hint": "使用预设模式时的结束回复内容",
+    "default": "好啦，我不看了～下次再陪你玩！",
+    "condition": {
+      "enabled": true,
+      "start_end_mode": "preset"
+    }
+  },
+  "start_llm_prompt": {
+    "description": "开始 LLM 提示词",
+    "type": "text",
+    "hint": "使用 LLM 模式时的开始回复提示词",
+    "default": "现在你开始监控用户的屏幕，用调皮可爱的语气和他打招呼，表现出你要开始偷看他的屏幕了，语气要符合活泼可爱的AI助手风格，简短自然。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "start_end_mode": "llm"
+    }
+  },
+  "end_llm_prompt": {
+    "description": "结束 LLM 提示词",
+    "type": "text",
+    "hint": "使用 LLM 模式时的结束回复提示词",
+    "default": "现在你结束监控用户的屏幕，用调皮可爱的语气和他告别，表现出你要停止偷看了，语气要符合活泼可爱的AI助手风格，简短自然。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "start_end_mode": "llm"
+    }
+  },
+  "enable_diary": {
+    "description": "启用日记功能",
+    "type": "bool",
+    "hint": "开启后，bot会在每天设定的时间总结当天通过屏幕看到的内容，并生成风格化的日记。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "diary_time": {
+    "description": "日记生成时间",
+    "type": "string",
+    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'22:00'。",
+    "default": "22:00",
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+  "diary_storage": {
+    "description": "日记存储路径",
+    "type": "string",
+    "hint": "日记文件的存储路径，留空则使用默认路径。",
+    "default": "E:\\astrbot\\小日记",
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+  "diary_reference_days": {
+    "description": "日记参考天数",
+    "type": "int",
+    "hint": "生成日记时参考前几天的日记内容，0表示不参考，1表示参考前1天，以此类推。",
+    "default": 2,
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+  "diary_auto_recall": {
+    "description": "是否自动撤回日记",
+    "type": "bool",
+    "hint": "开启后，发送日记消息后会在设定时间后自动撤回。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+  "diary_recall_time": {
+    "description": "日记自动撤回时间（秒）",
+    "type": "int",
+    "hint": "发送日记消息后多少秒自动撤回，默认30秒。",
+    "default": 30,
+    "condition": {
+      "enabled": true,
+      "enable_diary": true,
+      "diary_auto_recall": true
+    }
+  },
+
+  "diary_generation_prompt": {
+    "description": "日记生成提示词",
+    "type": "text",
+    "hint": "用于生成日记内容的提示词",
+    "default": "请以活泼可爱的AI助手的身份写一篇日记，记录今天的观察和感受。内容包括：1. 观察到用户今天做了什么（基于屏幕监控） 2. 对用户行为的推理和猜测 3. 融入自己的性格进行吐槽和锐评 4. 如果前一天的日记被偷看过，要加入警告内容 5. 使用口语化的表达，保持活泼可爱的语气，加入适当的语气词。不要只是单纯总结，要加入自己的想法和情感。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+  "weather_api_key": {
+    "description": "天气API密钥",
+    "type": "string",
+    "hint": "用于获取天气信息的API密钥，例如OpenWeatherMap的API密钥。留空则不启用天气感知功能。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "weather_city": {
+    "description": "城市名称",
+    "type": "string",
+    "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "weather_api_key": ""
+    }
+  },
+  "enable_mic_monitor": {
+    "description": "启用麦克风监听",
+    "type": "bool",
+    "hint": "开启后，插件会监听麦克风音量，当音量超过阈值时触发截屏回复。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "mic_threshold": {
+    "description": "麦克风音量阈值",
+    "type": "int",
+    "hint": "麦克风音量超过此值时触发截屏回复，范围 0-100。",
+    "default": 60,
+    "condition": {
+      "enabled": true,
+      "enable_mic_monitor": true
+    }
+  },
+  "mic_check_interval": {
+    "description": "麦克风检查间隔",
+    "type": "int",
+    "hint": "每隔多少秒检查一次麦克风音量，最小值为 1 秒。",
+    "default": 5,
+    "condition": {
+      "enabled": true,
+      "enable_mic_monitor": true
+    }
+  },
+  "admin_qq": {
+    "description": "管理员QQ号",
+    "type": "string",
+    "hint": "填写管理员的QQ号，用于接收主动消息和通知。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "proactive_target": {
+    "description": "主动消息推送目标",
+    "type": "string",
+    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:private_message:123456",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "save_local": {
+    "description": "是否在本地保留截图",
+    "type": "bool",
+    "hint": "如果开启，最近一次截图将保存在 data 目录中。关闭则在发送给 AI 后立即删除，以节省空间。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "custom_tasks": {
+    "description": "自定义监控任务",
+    "type": "text",
+    "hint": "设置特定时间的监控任务，格式为每行一个任务：时间 提示词。例如：02:00 这么晚了还在工作，快去休息吧！",
+    "default": "02:00 根据用户行为催促其尽快休息",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "rest_time_range": {
+    "description": "用户休息时间",
+    "type": "string",
+    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。在这个时间段内，bot会更积极地催促用户休息。留空表示不限制休息时间。",
+    "default": "22:00-06:00",
+    "condition": {
+      "enabled": true
+    }
   },
   "enable_learning": {
     "description": "启用用户行为学习",
     "type": "bool",
     "hint": "开启后，插件会根据用户的反馈和行为模式调整互动方式。",
-    "default": false
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
   },
   "learning_storage": {
     "description": "学习数据存储路径",
     "type": "string",
     "hint": "用户行为学习数据的存储路径，留空则使用默认路径。",
-    "default": ""
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "enable_learning": true
+    }
+  },
+  "interaction_kpi": {
+    "description": "快捷切换配置",
+    "type": "int",
+    "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
+    "default": 3,
+    "options": [1, 2, 3, 4, 5]
   }
 }

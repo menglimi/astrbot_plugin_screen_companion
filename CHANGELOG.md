@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-03-03
+
+### Added
+- 新增用户休息时间设置（rest_time_range），避免bot过早地开始催用户休息
+- 为配置项添加了条件显示功能，当主要功能关闭时隐藏对应的子配置
+
+### Fixed
+- 修复了配置 schema 中的 'type' 错误，确保插件能够正常加载
+
+### Changed
+- 隐藏了机器人的人格设定，简化配置面板
+- 将 KPI 互动强度的描述改为“快捷切换配置”并移到了配置面板底部
+- 隐藏了 KPI 互动强度的详细配置，只保留了级别选择
+- 隐藏了空日记相关配置和日记被偷看警告
+
 ## [1.7.0] - 2026-03-03
 
 ### Added
