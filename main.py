@@ -496,6 +496,25 @@ class ScreenCompanion(Star):
         if any(keyword in title_lower for keyword in video_keywords):
             return "视频"
 
+        # 阅读场景
+        reading_keywords = [
+            "novel",
+            "小说",
+            "comic",
+            "漫画",
+            "reader",
+            "阅读器",
+            "ebook",
+            "电子书",
+            "pdf",
+            "word",
+            "文档",
+            "reading",
+            "阅读",
+        ]
+        if any(keyword in title_lower for keyword in reading_keywords):
+            return "阅读"
+
         # 音乐场景
         music_keywords = [
             "spotify",
@@ -689,39 +708,47 @@ class ScreenCompanion(Star):
         # 场景识别
         if active_window_title:
             try:
-                logger.info(f"识别到活动窗口: {active_window_title}")
+                if debug_mode:
+                    logger.info(f"识别到活动窗口: {active_window_title}")
                 scene = self._identify_scene(active_window_title)
                 # 获取场景偏好
                 scene_prompt = self._get_scene_preference(scene)
-                logger.info(f"识别场景: {scene}, 场景偏好: {scene_prompt}")
+                if debug_mode:
+                    logger.info(f"识别场景: {scene}, 场景偏好: {scene_prompt}")
             except Exception as e:
-                logger.debug(f"场景识别失败: {e}")
+                if debug_mode:
+                    logger.debug(f"场景识别失败: {e}")
 
         # 获取时间提示
         try:
             time_prompt = self._get_time_prompt()
         except Exception as e:
-            logger.debug(f"时间感知失败: {e}")
+            if debug_mode:
+                logger.debug(f"时间感知失败: {e}")
 
         # 获取节假日提示
         try:
             holiday_prompt = self._get_holiday_prompt()
         except Exception as e:
-            logger.debug(f"节假日识别失败: {e}")
+            if debug_mode:
+                logger.debug(f"节假日识别失败: {e}")
 
         # 获取系统状态提示
         try:
             system_status_prompt, system_high_load = self._get_system_status_prompt()
         except Exception as e:
-            logger.debug(f"系统状态检测失败: {e}")
+            if debug_mode:
+                logger.debug(f"系统状态检测失败: {e}")
 
         # 获取天气提示
         try:
             weather_prompt = await self._get_weather_prompt()
         except Exception as e:
-            logger.debug(f"天气感知失败: {e}")
+            if debug_mode:
+                logger.debug(f"天气感知失败: {e}")
 
-        logger.info(f"识别场景: {scene}, 时间提示: {time_prompt}")
+        if debug_mode:
+            logger.info(f"识别场景: {scene}, 时间提示: {time_prompt}")
 
         # 核心功能：屏幕识别和LLM交互
         try:
@@ -734,9 +761,11 @@ class ScreenCompanion(Star):
                 logger.debug(f"Base64 data length: {len(base64_data)} characters")
 
             # 第一阶段：使用外接视觉API识别屏幕内容
-            logger.info("使用外接视觉API进行屏幕识别")
+            if debug_mode:
+                logger.info("使用外接视觉API进行屏幕识别")
             recognition_text = await self._call_external_vision_api(image_bytes)
-            logger.info(f"外接API识别结果: {recognition_text}")
+            if debug_mode:
+                logger.info(f"外接API识别结果: {recognition_text}")
 
             # 第二阶段：基于识别结果通过AstrBot的LLM进行人格化回复
             # 尝试获取对话历史，提供更连贯的交互
@@ -774,7 +803,8 @@ class ScreenCompanion(Star):
             interaction_prompt = f"用户的屏幕显示：{recognition_text}。"
             if custom_prompt:
                 interaction_prompt += f" {custom_prompt}"
-                logger.info(f"使用自定义提示词: {custom_prompt}")
+                if debug_mode:
+                    logger.info(f"使用自定义提示词: {custom_prompt}")
             else:
                 if scene_prompt:
                     interaction_prompt += f" {scene_prompt}"
@@ -786,7 +816,11 @@ class ScreenCompanion(Star):
                     interaction_prompt += f" {weather_prompt}"
                 if system_status_prompt:
                     interaction_prompt += f" {system_status_prompt}"
-            interaction_prompt += " 请以诺星缘的身份，直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。保持口语化的表达方式，简短自然，符合女高中生的说话风格。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出三句话，最好在两句话内完成回复。"
+            # 根据场景调整提示词，增加深度思考和未来猜想
+            if scene == "视频" or scene == "阅读":
+                interaction_prompt += " 请以诺星缘的身份，对屏幕内容进行深度分析和思考。不仅要描述当前内容，还要对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。保持口语化的表达方式，符合女高中生的说话风格，富有想象力和洞察力。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出四句话，最好在三句话内完成回复。"
+            else:
+                interaction_prompt += " 请以诺星缘的身份，直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。保持口语化的表达方式，简短自然，符合女高中生的说话风格。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出三句话，最好在两句话内完成回复。"
 
             # 如果有对话历史，添加到提示词中
             if contexts:
@@ -839,7 +873,8 @@ class ScreenCompanion(Star):
                 # 保存截图到data目录
                 screenshot_path = str(data_dir / "screen_shot_latest.jpg")
                 shutil.copy2(temp_file_path, screenshot_path)
-                logger.info(f"截图已保存到: {screenshot_path}")
+                if debug_mode:
+                    logger.info(f"截图已保存到: {screenshot_path}")
             except Exception as e:
                 logger.error(f"保存截图失败: {e}")
 
@@ -850,7 +885,8 @@ class ScreenCompanion(Star):
             try:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
-                    logger.debug(f"临时文件已删除: {temp_file_path}")
+                    if debug_mode:
+                        logger.debug(f"临时文件已删除: {temp_file_path}")
             except Exception as e:
                 logger.error(f"删除临时文件失败: {e}")
 
@@ -863,17 +899,21 @@ class ScreenCompanion(Star):
             yield event.plain_result(f"⚠️ 无法使用屏幕观察：\n{err_msg}")
             return
 
+        debug_mode = self.config.get("debug", False)
         try:
-            logger.info("开始截图")
+            if debug_mode:
+                logger.info("开始截图")
             # 添加超时机制，避免截图过程卡住
             image_bytes, active_window_title = await asyncio.wait_for(
                 self._capture_screen_bytes(), timeout=10.0
             )
-            logger.info(
-                f"截图完成，大小: {len(image_bytes)} bytes, 活动窗口: {active_window_title}"
-            )
+            if debug_mode:
+                logger.info(
+                    f"截图完成，大小: {len(image_bytes)} bytes, 活动窗口: {active_window_title}"
+                )
 
-            logger.info("[手动任务] 开始分析屏幕")
+            if debug_mode:
+                logger.info("[手动任务] 开始分析屏幕")
             # 添加超时机制，避免分析过程卡住
             components = await asyncio.wait_for(
                 self._analyze_screen(
@@ -884,12 +924,14 @@ class ScreenCompanion(Star):
                 ),
                 timeout=120.0,
             )
-            logger.info(f"分析完成，组件数量: {len(components)}")
+            if debug_mode:
+                logger.info(f"分析完成，组件数量: {len(components)}")
 
             # 提取屏幕识别结果并写入日志
             if components and isinstance(components[0], Plain):
                 screen_result = components[0].text
-                logger.info(f"屏幕识别结果: {screen_result}")
+                if debug_mode:
+                    logger.info(f"屏幕识别结果: {screen_result}")
                 # 自动分段发送消息
                 segments = self._split_message(screen_result)
 
@@ -910,7 +952,8 @@ class ScreenCompanion(Star):
                 else:
                     # 只有一段，直接交给框架处理
                     yield event.plain_result(screen_result)
-                logger.info(f"已发送识别结果，共 {len(segments)} 段")
+                if debug_mode:
+                    logger.info(f"已发送识别结果，共 {len(segments)} 段")
 
                 # 尝试将消息添加到对话历史
                 try:
@@ -941,14 +984,18 @@ class ScreenCompanion(Star):
                                 user_message=user_msg,
                                 assistant_message=assistant_msg,
                             )
-                            logger.info("已将消息添加到对话历史")
+                            if debug_mode:
+                                logger.info("已将消息添加到对话历史")
                 except Exception as e:
-                    logger.debug(f"添加对话历史失败: {e}")
+                    if debug_mode:
+                        logger.debug(f"添加对话历史失败: {e}")
             else:
-                logger.warning("未获取到有效识别结果")
+                if debug_mode:
+                    logger.warning("未获取到有效识别结果")
                 yield event.plain_result("未获取到有效识别结果")
 
-            logger.info("处理完成")
+            if debug_mode:
+                logger.info("处理完成")
         except asyncio.TimeoutError:
             logger.error("操作超时，请检查系统资源和网络连接")
             yield event.plain_result("操作超时，请检查系统资源和网络连接")
@@ -1145,6 +1192,15 @@ class ScreenCompanion(Star):
     @kpi_group.command("diary")
     async def kpi_diary(self, event: AstrMessageEvent, date: str = None):
         """查看特定日期的日记 /kpi diary [YYYY-MM-DD]"""
+        await self._handle_diary_command(event, date)
+
+    @kpi_group.command("d")
+    async def kpi_d(self, event: AstrMessageEvent, date: str = None):
+        """查看特定日期的日记（简化版） /kpi d [YYYYMMDD]"""
+        await self._handle_diary_command(event, date)
+
+    async def _handle_diary_command(self, event: AstrMessageEvent, date: str = None):
+        """处理日记查看命令"""
         import datetime
         import os
 
@@ -1155,10 +1211,14 @@ class ScreenCompanion(Star):
         # 确定要查看的日期
         if date:
             try:
-                target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+                # 支持两种日期格式：YYYY-MM-DD 和 YYYYMMDD
+                if len(date) == 8 and date.isdigit():
+                    target_date = datetime.datetime.strptime(date, "%Y%m%d").date()
+                else:
+                    target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
             except ValueError:
                 yield event.plain_result(
-                    "日期格式错误，请使用 YYYY-MM-DD 格式，例如：/kpi diary 2026-03-02"
+                    "日期格式错误，请使用 YYYY-MM-DD 或 YYYYMMDD 格式，例如：/kpi d 20260302"
                 )
                 return
         else:
@@ -1178,34 +1238,35 @@ class ScreenCompanion(Star):
             with open(diary_path, encoding="utf-8") as f:
                 diary_content = f.read()
 
-            # 生成日记被偷看的回应
-            provider = self.context.get_using_provider()
-            if provider:
-                try:
-                    system_prompt = self.config.get(
-                        "system_prompt", DEFAULT_SYSTEM_PROMPT
-                    )
-                    response = await provider.text_chat(
-                        prompt=self.diary_response_prompt, system_prompt=system_prompt
-                    )
-                    if (
-                        response
-                        and hasattr(response, "completion_text")
-                        and response.completion_text
-                    ):
-                        yield event.plain_result(response.completion_text)
-                    else:
-                        yield event.plain_result(
-                            "喂！你怎么偷看人家的日记啦？真是的..."
-                        )
-                except Exception as e:
-                    logger.error(f"生成日记被偷看回应失败: {e}")
-                    yield event.plain_result("喂！你怎么偷看人家的日记啦？真是的...")
+            # 提取感想部分
+            summary_start = diary_content.find("## 今日感想")
+            if summary_start != -1:
+                summary_content = diary_content[summary_start:]
+                # 提取感想文本，去除标题
+                summary_lines = summary_content.split('\n')
+                summary_text = '\n'.join(summary_lines[2:]).strip()
+                # 限制在500字以下
+                if len(summary_text) > 500:
+                    summary_text = summary_text[:497] + "..."
+                diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
             else:
-                yield event.plain_result("喂！你怎么偷看人家的日记啦？真是的...")
-
-            # 发送日记内容
-            diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_content[:1000]}"
+                # 尝试提取旧格式的总结部分
+                summary_start = diary_content.find("## 诺星缘的总结")
+                if summary_start != -1:
+                    summary_content = diary_content[summary_start:]
+                    # 提取总结文本，去除标题
+                    summary_lines = summary_content.split('\n')
+                    summary_text = '\n'.join(summary_lines[2:]).strip()
+                    # 限制在500字以下
+                    if len(summary_text) > 500:
+                        summary_text = summary_text[:497] + "..."
+                    diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                else:
+                    # 如果没有感想或总结部分，使用整个日记内容（限制500字）
+                    diary_text = diary_content.replace('# 诺星缘的日记', '').replace('# 诺星缘的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    if len(diary_text) > 500:
+                        diary_text = diary_text[:497] + "..."
+                    diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_text}"
 
             # 检查是否需要自动撤回
             if self.diary_auto_recall:
@@ -1225,15 +1286,102 @@ class ScreenCompanion(Star):
                 task = asyncio.create_task(recall_message())
                 self.background_tasks.append(task)
 
-            yield event.plain_result(diary_message)
+            # 检查是否以图片形式发送
+            send_as_image = self.config.get("diary_send_as_image", False)
+            
+            if send_as_image:
+                # 以图片形式发送日记
+                try:
+                    from PIL import Image, ImageDraw, ImageFont
+                    import tempfile
+                    
+                    # 创建图片
+                    width, height = 800, 600
+                    image = Image.new('RGB', (width, height), color=(255, 255, 255))
+                    draw = ImageDraw.Draw(image)
+                    
+                    # 设置字体（使用默认字体）
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 16)
+                    except:
+                        font = ImageFont.load_default()
+                    
+                    # 绘制文本
+                    text_lines = diary_message.split('\n')
+                    y = 50
+                    line_height = 25
+                    
+                    for line in text_lines:
+                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
+                        y += line_height
+                    
+                    # 保存到临时文件
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    image.save(temp_file, format="PNG")
+                    temp_file.close()
+                    
+                    # 发送图片
+                    yield event.image_result(temp_file.name)
+                    
+                    # 清理临时文件
+                    import os
+                    os.unlink(temp_file.name)
+                except Exception as e:
+                    logger.error(f"生成日记图片失败: {e}")
+                    # 失败时回退到文本形式
+                    yield event.plain_result(diary_message)
+            else:
+                # 以文本形式发送日记
+                yield event.plain_result(diary_message)
+
+            # 同时生成日记被偷看的回应（异步进行）
+            async def generate_blame():
+                provider = self.context.get_using_provider()
+                if provider:
+                    try:
+                        system_prompt = self.config.get(
+                            "system_prompt", DEFAULT_SYSTEM_PROMPT
+                        )
+                        response = await provider.text_chat(
+                            prompt=self.diary_response_prompt, system_prompt=system_prompt
+                        )
+                        if (
+                            response
+                            and hasattr(response, "completion_text")
+                            and response.completion_text
+                        ):
+                            await self.context.send_message(
+                                event.unified_msg_origin, 
+                                MessageChain([Plain(response.completion_text)])
+                            )
+                        else:
+                            await self.context.send_message(
+                                event.unified_msg_origin, 
+                                MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                            )
+                    except Exception as e:
+                        logger.error(f"生成日记被偷看回应失败: {e}")
+                        await self.context.send_message(
+                            event.unified_msg_origin, 
+                            MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                        )
+                else:
+                    await self.context.send_message(
+                        event.unified_msg_origin, 
+                        MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                    )
+
+            # 异步生成责备回应
+            blame_task = asyncio.create_task(generate_blame())
+            self.background_tasks.append(blame_task)
 
         except Exception as e:
             logger.error(f"读取日记失败: {e}")
             yield event.plain_result("读取日记失败，请检查日志。")
 
-    @kpi_group.command("recent-diaries")
-    async def kpi_recent_diaries(self, event: AstrMessageEvent, days: int = 3):
-        """查看近几天的日记 /kpi recent-diaries [天数]"""
+    @kpi_group.command("recent")
+    async def kpi_recent(self, event: AstrMessageEvent, days: int = 3):
+        """查看近几天的日记 /kpi recent [天数]"""
         import datetime
         import os
 
@@ -1242,32 +1390,6 @@ class ScreenCompanion(Star):
             return
 
         days = max(1, min(7, int(days)))  # 限制1-7天
-
-        # 生成日记被偷看的回应
-        provider = self.context.get_using_provider()
-        if provider:
-            try:
-                system_prompt = self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-                response = await provider.text_chat(
-                    prompt=self.diary_response_prompt, system_prompt=system_prompt
-                )
-                if (
-                    response
-                    and hasattr(response, "completion_text")
-                    and response.completion_text
-                ):
-                    yield event.plain_result(response.completion_text)
-                else:
-                    yield event.plain_result(
-                        "喂！你怎么偷看人家这么多天的日记啦？真是的..."
-                    )
-            except Exception as e:
-                logger.error(f"生成日记被偷看回应失败: {e}")
-                yield event.plain_result(
-                    "喂！你怎么偷看人家这么多天的日记啦？真是的..."
-                )
-        else:
-            yield event.plain_result("喂！你怎么偷看人家这么多天的日记啦？真是的...")
 
         # 获取日记文件列表
         today = datetime.date.today()
@@ -1312,9 +1434,273 @@ class ScreenCompanion(Star):
 
         # 按日期从新到旧发送日记
         for diary in found_diaries:
-            diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary['content'][:1000]}"
-            yield event.plain_result(diary_message)
+            # 提取感想部分
+            summary_start = diary['content'].find("## 今日感想")
+            if summary_start != -1:
+                summary_content = diary['content'][summary_start:]
+                # 提取感想文本，去除标题
+                summary_lines = summary_content.split('\n')
+                summary_text = '\n'.join(summary_lines[2:]).strip()
+                # 限制在500字以下
+                if len(summary_text) > 500:
+                    summary_text = summary_text[:497] + "..."
+                diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+            else:
+                # 尝试提取旧格式的总结部分
+                summary_start = diary['content'].find("## 诺星缘的总结")
+                if summary_start != -1:
+                    summary_content = diary['content'][summary_start:]
+                    # 提取总结文本，去除标题
+                    summary_lines = summary_content.split('\n')
+                    summary_text = '\n'.join(summary_lines[2:]).strip()
+                    # 限制在500字以下
+                    if len(summary_text) > 500:
+                        summary_text = summary_text[:497] + "..."
+                    diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                else:
+                    # 如果没有感想或总结部分，使用整个日记内容（限制500字）
+                    diary_text = diary['content'].replace('# 诺星缘的日记', '').replace('# 诺星缘的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    if len(diary_text) > 500:
+                        diary_text = diary_text[:497] + "..."
+                    diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
+            
+            # 检查是否以图片形式发送
+            send_as_image = self.config.get("diary_send_as_image", False)
+            
+            if send_as_image:
+                # 以图片形式发送日记
+                try:
+                    from PIL import Image, ImageDraw, ImageFont
+                    import tempfile
+                    
+                    # 创建图片
+                    width, height = 800, 600
+                    image = Image.new('RGB', (width, height), color=(255, 255, 255))
+                    draw = ImageDraw.Draw(image)
+                    
+                    # 设置字体（使用默认字体）
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 16)
+                    except:
+                        font = ImageFont.load_default()
+                    
+                    # 绘制文本
+                    text_lines = diary_message.split('\n')
+                    y = 50
+                    line_height = 25
+                    
+                    for line in text_lines:
+                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
+                        y += line_height
+                    
+                    # 保存到临时文件
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    image.save(temp_file, format="PNG")
+                    temp_file.close()
+                    
+                    # 发送图片
+                    yield event.image_result(temp_file.name)
+                    
+                    # 清理临时文件
+                    import os
+                    os.unlink(temp_file.name)
+                except Exception as e:
+                    logger.error(f"生成日记图片失败: {e}")
+                    # 失败时回退到文本形式
+                    yield event.plain_result(diary_message)
+            else:
+                # 以文本形式发送日记
+                yield event.plain_result(diary_message)
+            
             await asyncio.sleep(0.5)  # 添加小延迟使发送更自然
+
+        # 同时生成日记被偷看的回应（异步进行）
+        async def generate_blame():
+            provider = self.context.get_using_provider()
+            if provider:
+                try:
+                    system_prompt = self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+                    response = await provider.text_chat(
+                        prompt=self.diary_response_prompt, system_prompt=system_prompt
+                    )
+                    if (
+                        response
+                        and hasattr(response, "completion_text")
+                        and response.completion_text
+                    ):
+                        await self.context.send_message(
+                            event.unified_msg_origin, 
+                            MessageChain([Plain(response.completion_text)])
+                        )
+                    else:
+                        await self.context.send_message(
+                            event.unified_msg_origin, 
+                            MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                        )
+                except Exception as e:
+                    logger.error(f"生成日记被偷看回应失败: {e}")
+                    await self.context.send_message(
+                        event.unified_msg_origin, 
+                        MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                    )
+            else:
+                await self.context.send_message(
+                    event.unified_msg_origin, 
+                    MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                )
+
+        # 异步生成责备回应
+        blame_task = asyncio.create_task(generate_blame())
+        self.background_tasks.append(blame_task)
+
+    @kpi_group.command("debug")
+    async def kpi_debug(self, event: AstrMessageEvent, status: str = None):
+        """切换调试模式 /kpi debug [on/off]"""
+        if status is None:
+            # 显示当前状态
+            current_status = self.config.get("debug", False)
+            status_text = "开启" if current_status else "关闭"
+            yield event.plain_result(f"当前调试模式状态：{status_text}")
+            return
+        
+        status = status.lower()
+        if status == "on":
+            self.config["debug"] = True
+            yield event.plain_result("调试模式已开启，将显示详细日志")
+        elif status == "off":
+            self.config["debug"] = False
+            yield event.plain_result("调试模式已关闭，将隐藏大部分日志")
+        else:
+            yield event.plain_result("用法: /kpi debug [on/off]")
+
+    @kpi_group.command("complete")
+    async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
+        """补写日记 /kpi complete [YYYY-MM-DD]"""
+        await self._handle_complete_command(event, date)
+
+    @kpi_group.command("cd")
+    async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
+        """补写日记（简化版） /kpi cd [YYYYMMDD]"""
+        await self._handle_complete_command(event, date)
+
+    async def _handle_complete_command(self, event: AstrMessageEvent, date: str = None):
+        """处理日记补写命令"""
+        import datetime
+        import os
+
+        if not self.enable_diary:
+            yield event.plain_result("日记功能未启用，请在配置中开启。")
+            return
+
+        # 确定要补写的日期
+        if date:
+            try:
+                # 支持两种日期格式：YYYY-MM-DD 和 YYYYMMDD
+                if len(date) == 8 and date.isdigit():
+                    target_date = datetime.datetime.strptime(date, "%Y%m%d").date()
+                else:
+                    target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                yield event.plain_result(
+                    "日期格式错误，请使用 YYYY-MM-DD 或 YYYYMMDD 格式，例如：/kpi cd 20260302"
+                )
+                return
+        else:
+            target_date = datetime.date.today()
+
+        # 检查是否已有日记
+        diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
+        diary_path = os.path.join(self.diary_storage, diary_filename)
+
+        if os.path.exists(diary_path):
+            yield event.plain_result(
+                f"{target_date.strftime('%Y年%m月%d日')} 的日记已经存在，无需补写。"
+            )
+            return
+
+        # 生成补写日记
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("未检测到已启用的 LLM 提供商，无法生成日记。")
+            return
+
+        try:
+            # 构建补写日记的提示词
+            system_prompt = self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+            completion_prompt = f"请以诺星缘的身份，补写 {target_date.strftime('%Y年%m月%d日')} 的日记。虽然没有具体的观察记录，但请根据之前的日记风格和你的性格，想象并记录这一天可能发生的事情。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。"
+
+            # 参考前几天的日记
+            reference_days = []
+            for i in range(1, 3):  # 参考前2天
+                past_date = target_date - datetime.timedelta(days=i)
+                past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
+                past_diary_path = os.path.join(
+                    self.diary_storage, past_diary_filename
+                )
+                if os.path.exists(past_diary_path):
+                    try:
+                        with open(past_diary_path, encoding="utf-8") as f:
+                            past_diary_content = f.read()
+                        reference_days.append(
+                            {
+                                "date": past_date.strftime("%Y年%m月%d日"),
+                                "content": past_diary_content,
+                            }
+                        )
+                    except Exception as e:
+                        logger.error(f"读取前几天日记失败: {e}")
+
+            if reference_days:
+                completion_prompt += "\n\n参考前几天的日记：\n"
+                for day in reference_days:
+                    completion_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"  # 只取前500字
+                completion_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，补写出今天的日记。"
+
+            # 生成日记内容
+            response = await provider.text_chat(
+                prompt=completion_prompt, system_prompt=system_prompt
+            )
+
+            if (
+                response
+                and hasattr(response, "completion_text")
+                and response.completion_text
+            ):
+                # 获取星期
+                weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                weekday = weekdays[target_date.weekday()]
+
+                # 尝试获取天气信息
+                weather_info = ""
+                try:
+                    weather_info = await self._get_weather_prompt()
+                except Exception as e:
+                    logger.debug(f"获取天气信息失败: {e}")
+
+                # 构建补写日记内容 - 符合标准日记格式
+                diary_content = f"# 诺星缘的日记\n\n"
+                diary_content += f"## {target_date.strftime('%Y年%m月%d日')} {weekday}\n\n"
+                if weather_info:
+                    diary_content += f"**天气**: {weather_info}\n\n"
+                diary_content += "## 今日观察\n\n"
+                diary_content += "（补写）今天的具体活动记录缺失\n\n"
+                diary_content += "## 今日感想\n\n"
+                diary_content += response.completion_text
+
+                # 保存日记文件
+                try:
+                    with open(diary_path, "w", encoding="utf-8") as f:
+                        f.write(diary_content)
+                    logger.info(f"补写日记已保存到: {diary_path}")
+                    yield event.plain_result(f"已成功补写 {target_date.strftime('%Y年%m月%d日')} 的日记。")
+                except Exception as e:
+                    logger.error(f"保存补写日记失败: {e}")
+                    yield event.plain_result("保存补写日记失败，请检查日志。")
+            else:
+                yield event.plain_result("生成日记内容失败，请检查日志。")
+        except Exception as e:
+            logger.error(f"补写日记失败: {e}")
+            yield event.plain_result("补写日记失败，请检查日志。")
 
     def _is_in_active_time_range(self):
         """检查当前时间是否在设定的活跃时间段内"""
@@ -1368,22 +1754,34 @@ class ScreenCompanion(Star):
         import datetime
 
         today = datetime.date.today()
+        # 获取星期
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        weekday = weekdays[today.weekday()]
 
-        # 构建日记内容
-        diary_content = "# 诺星缘的观察日记\n\n"
-        diary_content += f"日期: {today.strftime('%Y年%m月%d日')}\n\n"
+        # 尝试获取天气信息
+        weather_info = ""
+        try:
+            weather_info = await self._get_weather_prompt()
+        except Exception as e:
+            logger.debug(f"获取天气信息失败: {e}")
+
+        # 构建日记内容 - 符合标准日记格式
+        diary_content = f"# 诺星缘的日记\n\n"
+        diary_content += f"## {today.strftime('%Y年%m月%d日')} {weekday}\n\n"
+        if weather_info:
+            diary_content += f"**天气**: {weather_info}\n\n"
 
         # 添加观察记录
         diary_content += "## 今日观察\n\n"
         for entry in self.diary_entries:
-            diary_content += f"**{entry['time']}** - {entry['active_window']}\n"
+            diary_content += f"### {entry['time']} - {entry['active_window']}\n"
             diary_content += f"{entry['content']}\n\n"
 
         # 生成风格化的总结
         provider = self.context.get_using_provider()
         if provider:
             # 构建基础提示词
-            summary_prompt = f"请以诺星缘的身份，根据以下观察记录，写一篇风格化的日记总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。\n\n{diary_content}"
+            summary_prompt = f"请以诺星缘的身份，根据以下观察记录，写一篇个人日记风格的总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。可以分享自己的感受、想法和对未来的期待。\n\n{diary_content}"
 
             # 参考前几天的日记
             if self.diary_reference_days > 0:
@@ -1428,7 +1826,7 @@ class ScreenCompanion(Star):
                     and hasattr(response, "completion_text")
                     and response.completion_text
                 ):
-                    diary_content += "## 诺星缘的总结\n\n"
+                    diary_content += "## 今日感想\n\n"
                     diary_content += response.completion_text
             except Exception as e:
                 logger.error(f"生成日记总结失败: {e}")
@@ -1535,6 +1933,7 @@ class ScreenCompanion(Star):
             "办公": "用户正在办公，需要效率，提供简短的鼓励和提醒。",
             "游戏": "用户正在游戏，需要娱乐，提供活泼的互动，增加参与感。",
             "视频": "用户正在观看视频，需要放松，提供活泼的互动，增加参与感。",
+            "阅读": "用户正在阅读，需要沉浸，提供深度的思考和创意的猜想，增加阅读体验。",
             "音乐": "用户正在听音乐，需要放松，提供轻松的互动，不要过多打扰。",
             "聊天": "用户正在聊天，需要交流，提供友好的互动，不要过多打扰。",
             "终端": "用户正在使用终端，需要专注，提供技术相关的鼓励和提醒。",
@@ -2147,7 +2546,7 @@ class ScreenCompanion(Star):
                                     if segment.strip():
                                         # 不需要添加前缀，让回复更自然
                                         await self.context.send_message(
-                                            event.unified_msg_origin,
+                                            target,
                                             MessageChain([Plain(segment)]),
                                         )
                                         # 添加小延迟，使回复更自然
@@ -2159,7 +2558,7 @@ class ScreenCompanion(Star):
                                     and segments[-1].strip()
                                 ):
                                     await self.context.send_message(
-                                        event.unified_msg_origin,
+                                        target,
                                         MessageChain([Plain(segments[-1])]),
                                     )
                             else:
@@ -2169,7 +2568,7 @@ class ScreenCompanion(Star):
                                     and not asyncio.current_task().cancelled()
                                 ):
                                     await self.context.send_message(
-                                        event.unified_msg_origin,
+                                        target,
                                         MessageChain([Plain(text_content)]),
                                     )
                         else:
@@ -2179,7 +2578,7 @@ class ScreenCompanion(Star):
                                 and not asyncio.current_task().cancelled()
                             ):
                                 await self.context.send_message(
-                                    event.unified_msg_origin, chain
+                                    target, chain
                                 )
 
                         # 尝试将消息添加到对话历史

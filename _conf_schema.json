@@ -267,6 +267,17 @@
     }
   },
 
+  "diary_send_as_image": {
+    "description": "以图片形式发送日记",
+    "type": "bool",
+    "hint": "开启后，发送日记时会将内容转换为图片形式发送，而不是文本形式。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
+
   "diary_generation_prompt": {
     "description": "日记生成提示词",
     "type": "text",
@@ -399,5 +410,11 @@
     "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
     "default": 3,
     "options": [1, 2, 3, 4, 5]
+  },
+  "debug": {
+    "description": "调试模式",
+    "type": "bool",
+    "hint": "开启后显示详细日志，关闭时隐藏大部分日志",
+    "default": false
   }
 }
