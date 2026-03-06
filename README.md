@@ -8,7 +8,12 @@
 **GitHub 仓库：** [https://github.com/menglimi/astrbot_plugin_screen_companion](https://github.com/menglimi/astrbot_plugin_screen_companion)
 
 ---
+## 已知问题
+- /kps与/kpi stop指令无法停止开始的自动化任务，甚至于在停用插件后依旧存在。这一bug从第一个发布版本至今每次都进行了优化，但始终没能彻底解决，足以怀疑该插件确实沾上了什么别的东西……
+- 考虑到这一bug会持续消耗token，建议您将触发概率修改至0或重启astrbot以解决被赛博女鬼追杀的问题。
 
+- 日记可能字数过多导致结尾被截断，修复前可自行前往日记目录阅读完整日记。
+  
 ## 支持的环境
 - Windows 桌面环境：需要授予屏幕录制权限
 - macOS 桌面环境：需要授予屏幕录制权限
