@@ -32,6 +32,9 @@ class ScreenCompanion(Star):
         self.task_counter = 0
         self.running = True
         self.background_tasks = []
+        # 状态管理
+        self.state = "inactive"  # active, inactive, temporary
+        self.temporary_tasks = {}
 
         # 日记功能相关
         self.enable_diary = config.get("enable_diary", False)
@@ -139,20 +142,81 @@ class ScreenCompanion(Star):
         logger.info("停止屏幕伴侣插件，清理所有任务")
         # 停止所有自动任务
         self.is_running = False
-        for task_id, task in self.auto_tasks.items():
+        self.state = "inactive"
+        
+        # 清理自动任务
+        tasks_to_cancel = list(self.auto_tasks.items())
+        for task_id, task in tasks_to_cancel:
+            logger.info(f"取消任务 {task_id}")
             task.cancel()
+
+        for task_id, task in tasks_to_cancel:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"等待任务 {task_id} 停止超时")
+            except asyncio.CancelledError:
+                logger.info(f"任务 {task_id} 已取消")
+            except Exception as e:
+                logger.error(f"等待任务 {task_id} 停止时出错: {e}")
+
         self.auto_tasks.clear()
         logger.info("所有自动任务已停止")
+        
+        # 清理临时任务
+        temp_tasks_to_cancel = list(self.temporary_tasks.items())
+        for task_id, task in temp_tasks_to_cancel:
+            logger.info(f"取消临时任务 {task_id}")
+            task.cancel()
 
-        # 停止其他后台任务
-        self.running = False
+        for task_id, task in temp_tasks_to_cancel:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"等待临时任务 {task_id} 停止超时")
+            except asyncio.CancelledError:
+                logger.info(f"临时任务 {task_id} 已取消")
+            except Exception as e:
+                logger.error(f"等待临时任务 {task_id} 停止时出错: {e}")
+
+        self.temporary_tasks.clear()
+        logger.info("所有临时任务已停止")
+
+        # 停止麦克风监听任务，但保留日记和自定义任务
         self.enable_mic_monitor = False
+
+        # 取消麦克风监听任务，保留日记和自定义任务
+        tasks_to_keep = []
+        for task in self.background_tasks:
+            # 检查任务名称或类型，保留日记和自定义任务
+            # 由于无法直接获取任务名称，我们通过重新启动这些任务来实现
+            tasks_to_keep.append(task)
 
         # 取消所有后台任务
         for task in self.background_tasks:
+            logger.info("取消后台任务")
             task.cancel()
+
+        for task in self.background_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("等待后台任务停止超时")
+            except asyncio.CancelledError:
+                logger.info("后台任务已取消")
+            except Exception as e:
+                logger.error(f"等待后台任务停止时出错: {e}")
+
         self.background_tasks.clear()
         logger.info("所有后台任务已停止")
+        
+        # 重新启动日记和自定义任务
+        self.running = True
+        task = asyncio.create_task(self._diary_task())
+        self.background_tasks.append(task)
+        task = asyncio.create_task(self._custom_tasks_task())
+        self.background_tasks.append(task)
+        logger.info("已重新启动日记和自定义任务")
 
     def _check_dependencies(self, check_mic=False):
         """检查并尝试导入必要库，避免在初始化时因缺少库导致整个插件加载失败"""
@@ -345,6 +409,8 @@ class ScreenCompanion(Star):
 
         lines = []
         max_text_width = max_width - padding * 2
+        title_count = 0  # 统计标题行数
+        
         for paragraph in diary_message.split('\n'):
             if not paragraph:
                 lines.append('')
@@ -361,9 +427,14 @@ class ScreenCompanion(Star):
                     current_line = char
             if current_line:
                 lines.append(current_line)
+                # 检查是否是标题行
+                if current_line.startswith('【') and '日记' in current_line:
+                    title_count += 1
 
-        total_height = padding * 2 + len(lines) * line_height + 20
-        total_height = max(200, total_height)
+        # 计算总高度，为标题行增加额外空间
+        title_extra_height = title_count * 4  # 每个标题额外增加4像素
+        total_height = padding * 2 + len(lines) * line_height + title_extra_height + 20
+        total_height = max(300, total_height)  # 增加最小高度
 
         image = Image.new('RGB', (max_width, total_height), color=(255, 253, 245))
         draw = ImageDraw.Draw(image)
@@ -387,11 +458,13 @@ class ScreenCompanion(Star):
                 if title_font is None:
                     title_font = font
                 draw.text((padding, y), line, fill=(139, 69, 19), font=title_font)
+                y += line_height + 4  # 标题行使用更大的行高
             elif line and line[0].isdigit() and '年' in line:
                 draw.text((padding, y), line, fill=(100, 100, 100), font=font)
+                y += line_height
             else:
                 draw.text((padding, y), line, fill=(60, 60, 60), font=font)
-            y += line_height
+                y += line_height
 
         temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         image.save(temp_file, format="PNG")
@@ -1189,10 +1262,13 @@ class ScreenCompanion(Star):
     @filter.command("kps")
     async def kps(self, event: AstrMessageEvent):
         """切换自动观察任务状态"""
-        if self.is_running:
+        if self.state == "active":
+            # 从活动状态切换到非活动状态
+            self.state = "inactive"
             self.is_running = False
             logger.info("正在停止所有自动观察任务...")
 
+            # 停止所有自动任务
             tasks_to_cancel = list(self.auto_tasks.items())
             for task_id, task in tasks_to_cancel:
                 logger.info(f"取消任务 {task_id}")
@@ -1200,7 +1276,7 @@ class ScreenCompanion(Star):
 
             for task_id, task in tasks_to_cancel:
                 try:
-                    await asyncio.wait_for(task, timeout=3.0)
+                    await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning(f"等待任务 {task_id} 停止超时")
                 except asyncio.CancelledError:
@@ -1213,6 +1289,7 @@ class ScreenCompanion(Star):
             end_response = await self._get_end_response()
             yield event.plain_result(end_response)
         else:
+            # 从非活动状态切换到活动状态
             if not self.config.get("enabled", False):
                 yield event.plain_result(
                     "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
@@ -1224,6 +1301,7 @@ class ScreenCompanion(Star):
                 yield event.plain_result(f"启动失败：\n{err_msg}")
                 return
 
+            self.state = "active"
             self.is_running = True
             task_id = f"task_{self.task_counter}"
             self.task_counter += 1
@@ -1253,6 +1331,8 @@ class ScreenCompanion(Star):
             yield event.plain_result(f"启动失败：\n{err_msg}")
             return
 
+        # 设置为活动状态
+        self.state = "active"
         if not self.is_running:
             self.is_running = True
         task_id = f"task_{self.task_counter}"
@@ -1284,13 +1364,18 @@ class ScreenCompanion(Star):
                 del self.auto_tasks[task_id]
                 if not self.auto_tasks:
                     self.is_running = False
+                    # 所有任务停止，设置为非活动状态
+                    self.state = "inactive"
                 yield event.plain_result(f"已停止任务 {task_id}。")
             else:
                 yield event.plain_result(f"任务 {task_id} 不存在。")
         else:
             logger.info("正在停止所有自动观察任务...")
             self.is_running = False
+            # 设置为非活动状态
+            self.state = "inactive"
 
+            # 停止所有自动任务
             tasks_to_cancel = list(self.auto_tasks.items())
             for task_id, task in tasks_to_cancel:
                 logger.info(f"取消任务 {task_id}")
@@ -1298,7 +1383,7 @@ class ScreenCompanion(Star):
 
             for task_id, task in tasks_to_cancel:
                 try:
-                    await asyncio.wait_for(task, timeout=3.0)
+                    await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning(f"等待任务 {task_id} 停止超时")
                 except asyncio.CancelledError:
@@ -1431,11 +1516,20 @@ class ScreenCompanion(Star):
                         summary_text = summary_text[:497] + "..."
                     diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
                 else:
-                    # 如果没有感想或总结部分，使用整个日记内容（限制500字）
-                    diary_text = diary_content.replace(f'# {self.bot_name}的日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
-                    if len(diary_text) > 500:
-                        diary_text = diary_text[:497] + "..."
-                    diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_text}"
+                    # 尝试从今日观察部分开始提取
+                    observation_start = diary_content.find("## 今日观察")
+                    if observation_start != -1:
+                        observation_content = diary_content[observation_start:]
+                        # 提取观察文本，去除标题
+                        observation_lines = observation_content.split('\n')
+                        observation_text = '\n'.join(observation_lines[2:]).strip()
+                        # 限制在500字以下
+                        if len(observation_text) > 500:
+                            observation_text = observation_text[:497] + "..."
+                        diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{observation_text}"
+                    else:
+                        # 如果没有任何结构化部分，使用空内容
+                        diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n今天没有记录。"
 
             # 检查是否需要自动撤回
             if self.diary_auto_recall:
@@ -2215,63 +2309,89 @@ class ScreenCompanion(Star):
                         await asyncio.sleep(self.mic_check_interval)
                         continue
 
-                    # 执行屏幕分析
+                    # 创建临时任务
                     try:
-                        # 创建一个虚拟的event对象，用于传递给_analyze_screen
-                        class VirtualEvent:
-                            def __init__(self):
-                                self.unified_msg_origin = self._get_default_target()
+                        # 保存当前状态
+                        current_state = self.state
+                        # 只有在非活动状态时才设置为临时任务状态
+                        if current_state == "inactive":
+                            self.state = "temporary"
+                        
+                        # 创建临时任务ID
+                        temp_task_id = f"temp_mic_{int(time.time())}"
+                        
+                        # 定义临时任务函数
+                        async def temp_mic_task():
+                            try:
+                                # 创建一个虚拟的event对象，用于传递给_analyze_screen
+                                class VirtualEvent:
+                                    def __init__(self):
+                                        self.unified_msg_origin = self._get_default_target()
 
-                            def _get_default_target(self):
-                                admin_qq = self.config.get("admin_qq", "")
-                                if admin_qq:
-                                    return f"aiocqhttp:FriendMessage:{admin_qq}"
-                                return ""
+                                    def _get_default_target(self):
+                                        admin_qq = self.config.get("admin_qq", "")
+                                        if admin_qq:
+                                            return f"aiocqhttp:FriendMessage:{admin_qq}"
+                                        return ""
 
-                        # 绑定config到VirtualEvent
-                        VirtualEvent.config = self.config
+                                # 绑定config到VirtualEvent
+                                VirtualEvent.config = self.config
 
-                        event = VirtualEvent()
+                                event = VirtualEvent()
 
-                        image_bytes, active_window_title = await asyncio.wait_for(
-                            self._capture_screen_bytes(), timeout=10.0
-                        )
-                        components = await asyncio.wait_for(
-                            self._analyze_screen(
-                                image_bytes,
-                                session=event,
-                                active_window_title=active_window_title,
-                                custom_prompt="我听到你说话声音很大，发生什么事了？",
-                                task_id="mic_monitor",
-                            ),
-                            timeout=120.0,
-                        )
-
-                        # 确定消息发送目标
-                        target = self.config.get("proactive_target", "")
-                        if not target:
-                            admin_qq = self.config.get("admin_qq", "")
-                            if admin_qq:
-                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
-
-                        if target:
-                            # 提取文本内容并发送
-                            text_content = ""
-                            for comp in components:
-                                if isinstance(comp, Plain):
-                                    text_content += comp.text
-
-                            if text_content:
-                                message = f"【声音提醒】\n{text_content}"
-                                await self.context.send_message(
-                                    target, MessageChain([Plain(message)])
+                                image_bytes, active_window_title = await asyncio.wait_for(
+                                    self._capture_screen_bytes(), timeout=10.0
                                 )
-                                logger.info("麦克风触发消息已发送")
+                                components = await asyncio.wait_for(
+                                    self._analyze_screen(
+                                        image_bytes,
+                                        session=event,
+                                        active_window_title=active_window_title,
+                                        custom_prompt="我听到你说话声音很大，发生什么事了？",
+                                        task_id=temp_task_id,
+                                    ),
+                                    timeout=120.0,
+                                )
 
-                        # 更新上次触发时间
-                        self.last_mic_trigger = current_time
+                                # 确定消息发送目标
+                                target = self.config.get("proactive_target", "")
+                                if not target:
+                                    admin_qq = self.config.get("admin_qq", "")
+                                    if admin_qq:
+                                        target = f"aiocqhttp:FriendMessage:{admin_qq}"
+
+                                if target:
+                                    # 提取文本内容并发送
+                                    text_content = ""
+                                    for comp in components:
+                                        if isinstance(comp, Plain):
+                                            text_content += comp.text
+
+                                    if text_content:
+                                        message = f"【声音提醒】\n{text_content}"
+                                        await self.context.send_message(
+                                            target, MessageChain([Plain(message)])
+                                        )
+                                        logger.info("麦克风触发消息已发送")
+
+                                # 更新上次触发时间
+                                self.last_mic_trigger = current_time
+                            finally:
+                                # 任务完成后，清理临时任务
+                                if temp_task_id in self.temporary_tasks:
+                                    del self.temporary_tasks[temp_task_id]
+                                # 如果没有其他任务，恢复到原始状态
+                                if not self.auto_tasks and not self.temporary_tasks:
+                                    self.state = current_state
+
+                        # 创建并启动临时任务
+                        self.temporary_tasks[temp_task_id] = asyncio.create_task(temp_mic_task())
+                        logger.info(f"已创建麦克风临时任务: {temp_task_id}")
                     except Exception as e:
-                        logger.error(f"执行麦克风触发时出错: {e}")
+                        logger.error(f"创建麦克风临时任务时出错: {e}")
+                        # 出错时恢复到原始状态
+                        if not self.auto_tasks and not self.temporary_tasks:
+                            self.state = current_state
 
                 # 等待检查间隔
                 await asyncio.sleep(self.mic_check_interval)
@@ -2300,43 +2420,69 @@ class ScreenCompanion(Star):
                             logger.error(f"自定义任务执行失败: {err_msg}")
                             continue
 
-                        # 执行屏幕分析
+                        # 创建临时任务
                         try:
-                            image_bytes, active_window_title = await asyncio.wait_for(
-                                self._capture_screen_bytes(), timeout=10.0
-                            )
-                            components = await asyncio.wait_for(
-                                self._analyze_screen(
-                                    image_bytes,
-                                    active_window_title=active_window_title,
-                                    custom_prompt=task["prompt"],
-                                    task_id="custom_task",
-                                ),
-                                timeout=120.0,
-                            )
-
-                            # 确定消息发送目标
-                            target = self.config.get("proactive_target", "")
-                            if not target:
-                                admin_qq = self.config.get("admin_qq", "")
-                                if admin_qq:
-                                    target = f"aiocqhttp:FriendMessage:{admin_qq}"
-
-                            if target:
-                                # 提取文本内容并发送
-                                text_content = ""
-                                for comp in components:
-                                    if isinstance(comp, Plain):
-                                        text_content += comp.text
-
-                                if text_content:
-                                    message = f"【定时提醒】\n{text_content}"
-                                    await self.context.send_message(
-                                        target, MessageChain([Plain(message)])
+                            # 保存当前状态
+                            current_state = self.state
+                            # 只有在非活动状态时才设置为临时任务状态
+                            if current_state == "inactive":
+                                self.state = "temporary"
+                            
+                            # 创建临时任务ID
+                            temp_task_id = f"temp_custom_{int(time.time())}"
+                            
+                            # 定义临时任务函数
+                            async def temp_custom_task():
+                                try:
+                                    image_bytes, active_window_title = await asyncio.wait_for(
+                                        self._capture_screen_bytes(), timeout=10.0
                                     )
-                                    logger.info("自定义任务消息已发送")
+                                    components = await asyncio.wait_for(
+                                        self._analyze_screen(
+                                            image_bytes,
+                                            active_window_title=active_window_title,
+                                            custom_prompt=task["prompt"],
+                                            task_id=temp_task_id,
+                                        ),
+                                        timeout=120.0,
+                                    )
+
+                                    # 确定消息发送目标
+                                    target = self.config.get("proactive_target", "")
+                                    if not target:
+                                        admin_qq = self.config.get("admin_qq", "")
+                                        if admin_qq:
+                                            target = f"aiocqhttp:FriendMessage:{admin_qq}"
+
+                                    if target:
+                                        # 提取文本内容并发送
+                                        text_content = ""
+                                        for comp in components:
+                                            if isinstance(comp, Plain):
+                                                text_content += comp.text
+
+                                        if text_content:
+                                            message = f"【定时提醒】\n{text_content}"
+                                            await self.context.send_message(
+                                                target, MessageChain([Plain(message)])
+                                            )
+                                            logger.info("自定义任务消息已发送")
+                                finally:
+                                    # 任务完成后，清理临时任务
+                                    if temp_task_id in self.temporary_tasks:
+                                        del self.temporary_tasks[temp_task_id]
+                                    # 如果没有其他任务，恢复到原始状态
+                                    if not self.auto_tasks and not self.temporary_tasks:
+                                        self.state = current_state
+
+                            # 创建并启动临时任务
+                            self.temporary_tasks[temp_task_id] = asyncio.create_task(temp_custom_task())
+                            logger.info(f"已创建自定义临时任务: {temp_task_id}")
                         except Exception as e:
-                            logger.error(f"执行自定义任务时出错: {e}")
+                            logger.error(f"创建自定义临时任务时出错: {e}")
+                            # 出错时恢复到原始状态
+                            if not self.auto_tasks and not self.temporary_tasks:
+                                self.state = current_state
 
                 # 等待1分钟，期间检查running标志
                 for _ in range(60):
@@ -2728,6 +2874,14 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"任务 {task_id} 异常: {e}")
         finally:
+            # 清理任务，确保从auto_tasks中删除
+            if task_id in self.auto_tasks:
+                del self.auto_tasks[task_id]
+                logger.info(f"任务 {task_id} 已从任务列表中删除")
+            # 检查是否还有其他任务在运行
+            if not self.auto_tasks:
+                self.is_running = False
+                logger.info("所有自动观察任务已结束")
             logger.info(f"任务 {task_id} 结束")
 
     def _split_message(self, text: str, max_length: int = 1000) -> list[str]:
