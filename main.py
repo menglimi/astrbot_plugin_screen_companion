@@ -4,6 +4,7 @@ import datetime
 import io
 import json
 import os
+import secrets
 import shutil
 import sys
 import tempfile
@@ -19,14 +20,24 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import BaseMessageComponent, Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 
+# 导入 WebServer 类
+from .web_server import WebServer
+# 导入配置管理
+from .core.config import PluginConfig
+
 
 class ScreenCompanion(Star):
     def __init__(self, context: Context, config: dict):
         import os
 
         super().__init__(context)
-        self.config = config
-        self.bot_name = config.get("bot_name", "屏幕助手")
+        
+        # 初始化插件配置
+        self.plugin_config = PluginConfig(config, context)
+        
+        # 同步配置到实例属性
+        self._sync_all_config()
+        
         self.auto_tasks = {}
         self.is_running = False
         self.task_counter = 0
@@ -39,90 +50,59 @@ class ScreenCompanion(Star):
         self.AUTO_TASK_ID = "task_0"
 
         # 日记功能相关
-        self.enable_diary = config.get("enable_diary", False)
-        self.diary_time = config.get("diary_time", "22:00")
-        self.diary_storage = config.get("diary_storage", "")
-        self.diary_reference_days = config.get("diary_reference_days", 0)
-        self.diary_auto_recall = config.get("diary_auto_recall", False)
-        self.diary_recall_time = config.get("diary_recall_time", 30)
-        self.diary_response_prompt = config.get(
-            "diary_response_prompt",
-            "你发现用户居然偷看了你写的用户观察日记，给予简单的回应，保持在一句话之内完成。",
-        )
         self.diary_entries = []
         self.last_diary_date = None
 
         # 初始化日记存储路径
         if not self.diary_storage:
-            self.diary_storage = str(StarTools.get_data_dir() / "diary")
+            self.diary_storage = str(self.plugin_config.diary_dir)
         os.makedirs(self.diary_storage, exist_ok=True)
 
         # 自定义监控任务相关
-        self.custom_tasks = self.config.get("custom_tasks", "")
         self.parsed_custom_tasks = []
         self._parse_custom_tasks()
 
         # 麦克风监听相关
-        self.enable_mic_monitor = self.config.get("enable_mic_monitor", False)
-        self.mic_threshold = self.config.get("mic_threshold", 60)
-        self.mic_check_interval = max(1, self.config.get("mic_check_interval", 5))
         self.last_mic_trigger = 0  # 上次触发时间，用于防抖
         self.mic_debounce_time = 60  # 防抖时间，单位秒
 
         # 用户偏好和学习相关
-        self.user_preferences = self.config.get("user_preferences", "")
-        self.enable_learning = self.config.get("enable_learning", False)
-        self.learning_storage = self.config.get("learning_storage", "")
         self.parsed_preferences = {}
         self.learning_data = {}
 
-        # 互动模式预设参数映射
-        self.mode_settings = {
-            "轻度互动模式": {
-                "check_interval": 180,
-                "trigger_probability": 3,
-                "active_time_range": "09:00-23:00",
-            },
-            "中度互动模式": {
-                "check_interval": 60,
-                "trigger_probability": 8,
-                "active_time_range": "19:00-23:00",
-            },
-            "高频互动模式": {
-                "check_interval": 30,
-                "trigger_probability": 20,
-                "active_time_range": "10:00-22:00",
-            },
-            "静默模式": {
-                "check_interval": 300,
-                "trigger_probability": 1,
-                "active_time_range": "14:00-16:00",
-            },
-        }
+        self.custom_presets = self.plugin_config.custom_presets
+        self.current_preset_index = self.plugin_config.current_preset_index
+        self.parsed_custom_presets = []
+        self._parse_custom_presets()
+        # 确保预设索引有效
+        if self.current_preset_index >= len(self.parsed_custom_presets):
+            self.current_preset_index = -1
 
         # 互动模式状态跟踪
-        self.last_interaction_mode = self.config.get("interaction_mode", "自定义")
-        self.last_check_interval = self.config.get("check_interval", 300)
-        self.last_trigger_probability = self.config.get("trigger_probability", 30)
-        self.last_active_time_range = self.config.get("active_time_range", "")
+        self.last_interaction_mode = self.interaction_mode
+        self.last_check_interval = self.check_interval
+        self.last_trigger_probability = self.trigger_probability
+        self.last_active_time_range = self.active_time_range
 
         # 初始化学习数据存储路径
         if not self.learning_storage:
-            self.learning_storage = str(StarTools.get_data_dir() / "learning")
+            self.learning_storage = str(self.plugin_config.learning_dir)
         os.makedirs(self.learning_storage, exist_ok=True)
 
         # 观察记录相关
-        self.observation_storage = self.config.get("observation_storage", "")
-        self.max_observations = self.config.get("max_observations", 5)  # 最大保存的观察记录数
         self.observations = []  # 存储观察记录
 
         # 初始化观察记录存储路径
         if not self.observation_storage:
-            self.observation_storage = str(StarTools.get_data_dir() / "observations")
+            self.observation_storage = str(self.plugin_config.observations_dir)
         os.makedirs(self.observation_storage, exist_ok=True)
 
         # 加载观察记录
         self._load_observations()
+
+        # Web UI 相关
+        self.web_server = None
+        self._ensure_webui_password()
 
         # 日记元数据相关（记录日记查看状态）
         self.diary_metadata = {}
@@ -135,7 +115,6 @@ class ScreenCompanion(Star):
         self._load_long_term_memory()
 
         # 互动频率管理
-        self.interaction_frequency = self.config.get("interaction_frequency", 5)  # 基础互动频率
         self.user_engagement = 5  # 用户参与度，范围1-10，默认5
         self.engagement_history = []  # 记录用户参与度历史
 
@@ -180,6 +159,11 @@ class ScreenCompanion(Star):
             task = asyncio.create_task(self._diary_task())
             self.background_tasks.append(task)
 
+        # 启动 Web UI（如果启用）
+        if self.webui_enabled:
+            task = asyncio.create_task(self._start_webui())
+            self.background_tasks.append(task)
+
         # 启动自定义监控任务
         task = asyncio.create_task(self._custom_tasks_task())
         self.background_tasks.append(task)
@@ -187,6 +171,236 @@ class ScreenCompanion(Star):
         # 启动麦克风监听任务
         task = asyncio.create_task(self._mic_monitor_task())
         self.background_tasks.append(task)
+
+    def _sync_all_config(self) -> None:
+        """从配置服务同步所有配置到实例属性。"""
+        # 同步基础配置
+        self.bot_name = self.plugin_config.bot_name
+        self.enabled = self.plugin_config.enabled
+        self.interaction_mode = self.plugin_config.interaction_mode
+        self.check_interval = self.plugin_config.check_interval
+        self.trigger_probability = self.plugin_config.trigger_probability
+        self.active_time_range = self.plugin_config.active_time_range
+        self.watch_mode = self.plugin_config.watch_mode
+        self.capture_mode = self.plugin_config.capture_mode
+        self.bot_vision_quality = self.plugin_config.bot_vision_quality
+        self.image_prompt = self.plugin_config.image_prompt
+        self.use_external_vision = self.plugin_config.use_external_vision
+        self.vision_api_url = self.plugin_config.vision_api_url
+        self.vision_api_key = self.plugin_config.vision_api_key
+        self.vision_api_model = self.plugin_config.vision_api_model
+        self.user_preferences = self.plugin_config.user_preferences
+        self.start_end_mode = self.plugin_config.start_end_mode
+        self.start_preset = self.plugin_config.start_preset
+        self.end_preset = self.plugin_config.end_preset
+        self.start_llm_prompt = self.plugin_config.start_llm_prompt
+        self.end_llm_prompt = self.plugin_config.end_llm_prompt
+        self.enable_diary = self.plugin_config.enable_diary
+        self.diary_time = self.plugin_config.diary_time
+        self.diary_storage = self.plugin_config.diary_storage
+        self.diary_reference_days = self.plugin_config.diary_reference_days
+        self.diary_auto_recall = self.plugin_config.diary_auto_recall
+        self.diary_recall_time = self.plugin_config.diary_recall_time
+        self.diary_send_as_image = self.plugin_config.diary_send_as_image
+        self.diary_generation_prompt = self.plugin_config.diary_generation_prompt
+        self.weather_api_key = self.plugin_config.weather_api_key
+        self.weather_city = self.plugin_config.weather_city
+        self.enable_mic_monitor = self.plugin_config.enable_mic_monitor
+        self.mic_threshold = self.plugin_config.mic_threshold
+        self.mic_check_interval = self.plugin_config.mic_check_interval
+        self.admin_qq = self.plugin_config.admin_qq
+        self.proactive_target = self.plugin_config.proactive_target
+        self.save_local = self.plugin_config.save_local
+        self.custom_tasks = self.plugin_config.custom_tasks
+        self.rest_time_range = self.plugin_config.rest_time_range
+        self.enable_learning = self.plugin_config.enable_learning
+        self.learning_storage = self.plugin_config.learning_storage
+        self.interaction_kpi = self.plugin_config.interaction_kpi
+        self.debug = self.plugin_config.debug
+        # 同步自定义预设配置
+        self.custom_presets = self.plugin_config.custom_presets
+        self.current_preset_index = self.plugin_config.current_preset_index
+        # 解析自定义预设
+        self._parse_custom_presets()
+        # 确保预设索引有效
+        if self.current_preset_index >= len(self.parsed_custom_presets):
+            self.current_preset_index = -1
+            self.plugin_config.current_preset_index = -1
+        # 同步额外配置
+        self.observation_storage = self.plugin_config.observation_storage
+        self.max_observations = self.plugin_config.max_observations
+        self.interaction_frequency = self.plugin_config.interaction_frequency
+        self.image_quality = self.plugin_config.image_quality
+        self.system_prompt = self.plugin_config.system_prompt
+
+        # 同步 WebUI 配置
+        self.webui_enabled = self.plugin_config.webui.enabled
+        self.webui_host = self.plugin_config.webui.host
+        self.webui_port = self.plugin_config.webui.port
+        self.webui_auth_enabled = self.plugin_config.webui.auth_enabled
+        self.webui_password = self.plugin_config.webui.password
+        self.webui_session_timeout = self.plugin_config.webui.session_timeout
+
+    def _parse_custom_presets(self) -> list:
+        """解析自定义预设配置。"""
+        self.parsed_custom_presets = []
+        if not self.custom_presets:
+            return self.parsed_custom_presets
+        
+        lines = self.custom_presets.strip().split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('|')
+            if len(parts) >= 3:
+                try:
+                    preset = {
+                        "name": parts[0].strip(),
+                        "check_interval": max(10, int(parts[1].strip())),
+                        "trigger_probability": max(0, min(100, int(parts[2].strip())))
+                    }
+                    self.parsed_custom_presets.append(preset)
+                except ValueError:
+                    continue
+        return self.parsed_custom_presets
+
+    def _get_current_preset_params(self) -> tuple:
+        """获取当前预设的参数，如果未使用预设则返回自定义参数。"""
+        if self.current_preset_index >= 0 and self.current_preset_index < len(self.parsed_custom_presets):
+            preset = self.parsed_custom_presets[self.current_preset_index]
+            return preset["check_interval"], preset["trigger_probability"]
+        return self.check_interval, self.trigger_probability
+
+    def _ensure_webui_password(self) -> bool:
+        """确保 WebUI 密码已设置，自动生成时返回明文密码供用户查看。"""
+        # 检查密码是否已设置（非空且非默认值）
+        current_password = str(self.plugin_config.webui.password or "").strip()
+        # 只有当认证启用且用户明确要求密码保护时才生成密码
+        # 如果用户设置了空密码，尊重用户选择，不生成密码
+        if (
+            self.plugin_config.webui.enabled
+            and self.plugin_config.webui.auth_enabled
+            and not current_password
+            # 新增检查：只有当认证启用且用户没有明确设置空密码时才生成
+            # 如果用户在配置中设置了空密码，不生成新密码
+        ):
+            # 生成随机密码
+            generated = f"{secrets.randbelow(1000000):06d}"
+            # 存储密码
+            self.plugin_config.webui.password = generated
+            self.plugin_config.save_webui_config()
+            logger.info(f"WebUI 访问密码已自动生成: {generated}")
+            logger.info("请在配置中查看或修改此密码")
+            return True
+        return False
+
+    def _snapshot_webui_runtime(self) -> tuple[bool, str, int, str, int]:
+        """获取当前 WebUI 运行态配置快照。"""
+        return (
+            getattr(self, "webui_enabled", False),
+            getattr(self, "webui_host", "0.0.0.0"),
+            getattr(self, "webui_port", 8898),
+            getattr(self, "webui_password", ""),
+            getattr(self, "webui_session_timeout", 3600),
+        )
+
+    def _is_webui_runtime_changed(
+        self, old_state: tuple[bool, str, int, str, int]
+    ) -> bool:
+        return old_state != self._snapshot_webui_runtime()
+
+    async def _restart_webui(self) -> None:
+        logger.info("检测到 WebUI 配置变更，正在重启 WebUI...")
+        if self.web_server:
+            await self.web_server.stop()
+            self.web_server = None
+
+        if not self.webui_enabled:
+            return
+
+        try:
+            self.web_server = WebServer(self, host=self.webui_host, port=self.webui_port)
+            await self.web_server.start()
+        except Exception as e:
+            logger.error(f"重启 WebUI 失败: {e}")
+
+    def _apply_plugin_config_updates(self, config_dict: dict) -> None:
+        """将更新字典写回 PluginConfig（包含 webui 嵌套字段兼容）。"""
+        for k, v in config_dict.items():
+            if k == "webui" and isinstance(v, dict):
+                current_webui = self.plugin_config.webui
+                # 检查是否明确设置了空密码
+                password_set_to_empty = "password" in v and not str(v["password"] or "").strip()
+                for wk, wv in v.items():
+                    # 如果明确设置了空密码，允许更新
+                    if wk == "password" and not str(wv or "").strip():
+                        # 允许设置空密码
+                        setattr(current_webui, wk, wv)
+                    else:
+                        setattr(current_webui, wk, wv)
+                self.plugin_config.save_webui_config()
+            elif k.startswith("webui_"):
+                # 兼容旧版扁平 key：webui_enabled -> webui.enabled
+                wk = k[6:]
+                if hasattr(self.plugin_config.webui, wk):
+                    # 如果明确设置了空密码，允许更新
+                    if wk == "password" and not str(v or "").strip():
+                        # 允许设置空密码
+                        setattr(self.plugin_config.webui, wk, v)
+                    else:
+                        setattr(self.plugin_config.webui, wk, v)
+                    self.plugin_config.save_webui_config()
+            else:
+                setattr(self.plugin_config, k, v)
+
+    def _update_config_from_dict(self, config_dict: dict):
+        """从配置字典更新插件配置。"""
+        if not config_dict:
+            return
+
+        try:
+            # 使用配置服务更新配置
+            if self.plugin_config:
+                old_webui_state = self._snapshot_webui_runtime()
+                self._apply_plugin_config_updates(config_dict)
+
+                # 统一同步所有配置
+                self._sync_all_config()
+
+                # 检查是否明确设置了空密码
+                password_set_to_empty = False
+                if "webui" in config_dict and isinstance(config_dict["webui"], dict):
+                    password_set_to_empty = "password" in config_dict["webui"] and not str(config_dict["webui"]["password"] or "").strip()
+                elif "webui_password" in config_dict:
+                    password_set_to_empty = not str(config_dict["webui_password"] or "").strip()
+                
+                # 只有当没有明确设置空密码时，才确保密码已设置
+                if not password_set_to_empty and self._ensure_webui_password():
+                    self._sync_all_config()
+
+                # 检查 WebUI 配置是否变化并重启
+                if self._is_webui_runtime_changed(old_webui_state):
+                    self._safe_create_task(self._restart_webui(), name="restart_webui")
+
+                logger.debug("[Config] 配置已更新")
+        except Exception as e:
+            logger.error(f"更新配置失败: {e}")
+
+    @staticmethod
+    def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
+        """创建 asyncio task 并自动记录未处理异常，避免 fire-and-forget 静默吞异常。"""
+        task = asyncio.create_task(coro, name=name or None)
+
+        def _on_done(t: asyncio.Task):
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.error(f"后台任务 '{t.get_name()}' 异常: {exc}", exc_info=exc)
+
+        task.add_done_callback(_on_done)
+        return task
 
     def _load_observations(self):
         """加载观察记录"""
@@ -722,7 +936,7 @@ class ScreenCompanion(Star):
 
         if (
             sys.platform == "win32"
-            and self.config.get("capture_mode") == "active_window"
+            and self.capture_mode == "active_window"
         ):
             try:
                 import pygetwindow
@@ -793,25 +1007,22 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.debug(f"获取框架人格失败: {e}")
         
-        config_prompt = self.config.get("system_prompt", "")
+        config_prompt = self.system_prompt
         if config_prompt:
             return config_prompt
         return DEFAULT_SYSTEM_PROMPT
 
     async def _get_start_response(self) -> str:
         """获取开始监控的回复"""
-        mode = self.config.get("start_end_mode", "llm")
+        mode = self.start_end_mode
         if mode == "preset":
-            return self.config.get("start_preset", "知道啦~我会时不时过来看一眼的")
+            return self.start_preset
         else:
             provider = self.context.get_using_provider()
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt()
-                    prompt = self.config.get(
-                        "start_llm_prompt",
-                        "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。"
-                    )
+                    prompt = self.start_llm_prompt
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=prompt, system_prompt=system_prompt),
                         timeout=60.0
@@ -826,18 +1037,15 @@ class ScreenCompanion(Star):
 
     async def _get_end_response(self) -> str:
         """获取结束监控的回复"""
-        mode = self.config.get("start_end_mode", "llm")
+        mode = self.start_end_mode
         if mode == "preset":
-            return self.config.get("end_preset", "好啦，我不看了～下次再陪你玩！")
+            return self.end_preset
         else:
             provider = self.context.get_using_provider()
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt()
-                    prompt = self.config.get(
-                        "end_llm_prompt",
-                        "你以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。"
-                    )
+                    prompt = self.end_llm_prompt
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=prompt, system_prompt=system_prompt),
                         timeout=60.0
@@ -980,7 +1188,7 @@ class ScreenCompanion(Star):
                     if screenshot.mode != "RGB":
                         screenshot = screenshot.convert("RGB")
                     img_byte_arr = io.BytesIO()
-                    quality_val = self.config.get("image_quality", 70)
+                    quality_val = self.image_quality
                     try:
                         quality = max(10, min(100, int(quality_val)))
                     except (ValueError, TypeError):
@@ -1003,7 +1211,7 @@ class ScreenCompanion(Star):
                     if screenshot.mode != "RGB":
                         screenshot = screenshot.convert("RGB")
                     img_byte_arr = io.BytesIO()
-                    quality_val = self.config.get("image_quality", 70)
+                    quality_val = self.image_quality
                     try:
                         quality = max(10, min(100, int(quality_val)))
                     except (ValueError, TypeError):
@@ -1028,7 +1236,7 @@ class ScreenCompanion(Star):
                     screenshot = screenshot.convert("RGB")
                 
                 img_byte_arr = io.BytesIO()
-                quality_val = self.config.get("image_quality", 70)
+                quality_val = self.image_quality
                 try:
                     quality = max(10, min(100, int(quality_val)))
                 except (ValueError, TypeError):
@@ -1045,7 +1253,7 @@ class ScreenCompanion(Star):
                     if screenshot.mode != "RGB":
                         screenshot = screenshot.convert("RGB")
                     img_byte_arr = io.BytesIO()
-                    quality_val = self.config.get("image_quality", 70)
+                    quality_val = self.image_quality
                     try:
                         quality = max(10, min(100, int(quality_val)))
                     except (ValueError, TypeError):
@@ -1064,79 +1272,93 @@ class ScreenCompanion(Star):
         import aiohttp
 
         # 获取配置
-        api_url = self.config.get("vision_api_url", "")
-        api_key = self.config.get("vision_api_key", "")
-        api_model = self.config.get("vision_api_model", "")
-        image_prompt = self.config.get(
-            "image_prompt",
-            "请详细分析这张屏幕截图，识别出：1. 屏幕上显示的内容和界面元素 2. 用户可能正在进行的操作或任务 3. 屏幕上的关键信息和细节。请提供详细的分析结果，以便后续基于此进行针对性互动。",
-        )
+        api_url = self.vision_api_url
+        api_key = self.vision_api_key
+        api_model = self.vision_api_model
+        image_prompt = self.image_prompt
 
         if not api_url:
             logger.error("未配置视觉API地址")
-            return "无法识别屏幕内容，未配置视觉API地址"
+            return "……好像忘了看什么了……"
 
-        try:
-            # 编码图像数据
-            base64_data = base64.b64encode(image_bytes).decode("utf-8")
-
-            # 构建请求数据 - 使用正确的messages格式
-            payload = {
-                "model": api_model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": image_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_data}"
-                                },
+        # 构建请求数据
+        base64_data = base64.b64encode(image_bytes).decode("utf-8")
+        payload = {
+            "model": api_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": image_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_data}"
                             },
-                        ],
-                    }
-                ],
-                "stream": False,
-            }
+                        },
+                    ],
+                }
+            ],
+            "stream": False,
+        }
 
-            # 构建请求头
-            headers = {"Content-Type": "application/json"}
+        # 构建请求头
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+        # 重试机制
+        max_retries = 3
+        retry_delay = 2  # 秒
 
-            # 发送请求 - 添加超时设置
-            timeout = aiohttp.ClientTimeout(total=120.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    api_url, json=payload, headers=headers
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        # 提取识别结果（根据API返回格式调整）
-                        if "choices" in result and len(result["choices"]) > 0:
-                            choice = result["choices"][0]
-                            if "message" in choice and "content" in choice["message"]:
-                                return choice["message"]["content"]
-                            elif "text" in choice:
-                                return choice["text"]
-                        elif "response" in result:
-                            return result["response"]
+        for attempt in range(max_retries):
+            try:
+                # 发送请求 - 添加超时设置
+                timeout = aiohttp.ClientTimeout(total=120.0)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        api_url, json=payload, headers=headers
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            # 提取识别结果（根据API返回格式调整）
+                            if "choices" in result and len(result["choices"]) > 0:
+                                choice = result["choices"][0]
+                                if "message" in choice and "content" in choice["message"]:
+                                    return choice["message"]["content"]
+                                elif "text" in choice:
+                                    return choice["text"]
+                            elif "response" in result:
+                                return result["response"]
+                            else:
+                                return "……头晕晕的，看不太清……"
                         else:
-                            return "无法识别屏幕内容，API返回格式异常"
-                    else:
-                        error_text = await response.text()
-                        logger.error(
-                            f"视觉API调用失败: {response.status} - {error_text}"
-                        )
-                        return f"无法识别屏幕内容，API调用失败: {response.status}"
-        except asyncio.TimeoutError:
-            logger.error("视觉API调用超时，请检查网络连接")
-            return "无法识别屏幕内容，API调用超时"
-        except Exception as e:
-            logger.error(f"调用视觉API异常: {e}")
-            return f"无法识别屏幕内容，API调用异常: {str(e)}"
+                            error_text = await response.text()
+                            logger.error(
+                                f"视觉API调用失败 (尝试 {attempt+1}/{max_retries}): {response.status} - {error_text}"
+                            )
+                            if attempt < max_retries - 1:
+                                logger.info(f"等待 {retry_delay} 秒后重试...")
+                                await asyncio.sleep(retry_delay)
+                                retry_delay *= 2  # 指数退避
+                            else:
+                                return "……刚才走神了，再来一次？"
+            except asyncio.TimeoutError:
+                logger.error(f"视觉API调用超时 (尝试 {attempt+1}/{max_retries})，请检查网络连接")
+                if attempt < max_retries - 1:
+                    logger.info(f"等待 {retry_delay} 秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                else:
+                    return "……网络好像有点卡……再试一次？"
+            except Exception as e:
+                logger.error(f"调用视觉API异常 (尝试 {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"等待 {retry_delay} 秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                else:
+                    return "……刚才晕了一下，再来？"
 
     def _identify_scene(self, window_title: str) -> str:
         """增强的场景识别"""
@@ -1418,8 +1640,8 @@ class ScreenCompanion(Star):
     async def _get_weather_prompt(self) -> str:
         """获取天气提示词"""
         weather_prompt = ""
-        weather_api_key = self.config.get("weather_api_key", "")
-        weather_city = self.config.get("weather_city", "")
+        weather_api_key = self.weather_api_key
+        weather_city = self.weather_city
 
         if weather_api_key and weather_city:
             try:
@@ -1477,7 +1699,7 @@ class ScreenCompanion(Star):
         system_prompt = await self._get_persona_prompt(umo)
         logger.info(f"[任务 {task_id}] 使用人格设定")
 
-        debug_mode = self.config.get("debug", False)
+        debug_mode = self.debug
 
         # 预处理：获取各种提示词（非核心功能，失败不影响主流程）
         scene = "未知"
@@ -1679,12 +1901,28 @@ class ScreenCompanion(Star):
 
         except Exception as e:
             logger.error(f"核心功能失败: {e}")
-            # 如果核心功能失败，返回一个默认的回复
-            return [
-                Plain(
-                    "我已经看到了你的屏幕，但是无法进行分析。请确保你配置的视觉API正确。"
-                )
-            ]
+            # 如果核心功能失败，返回一个符合角色的默认回复
+            error_msg = str(e)
+            error_type = "unknown"
+            error_text = ""
+            
+            if "timeout" in error_msg.lower() or "超时" in error_msg:
+                error_type = "timeout"
+                error_text = "……刚才好像走神了，再来一次？"
+            elif "api" in error_msg.lower() or "api" in error_msg:
+                error_type = "api"
+                error_text = "看不清呢……眼睛有点花……"
+            elif "vision" in error_msg.lower():
+                error_type = "vision"
+                error_text = "晕乎乎的……刚才看到什么了？"
+            else:
+                error_type = "unknown"
+                error_text = "……刚才有点困了，再试一次？"
+            
+            # 添加日记条目时标记错误类型
+            self._add_diary_entry(f"[错误-{error_type}] " + error_text, active_window_title)
+            
+            return [Plain(error_text)]
 
         # 保存截图到临时文件
         # 创建临时文件，使用uuid生成唯一文件名
@@ -1696,7 +1934,7 @@ class ScreenCompanion(Star):
             f.write(base64.b64decode(base64_data))
 
         # 保存截图到本地（如果配置启用）
-        if self.config.get("save_local", False):
+        if self.save_local:
             try:
                 # 确保data目录存在
                 data_dir = StarTools.get_data_dir()
@@ -1731,7 +1969,7 @@ class ScreenCompanion(Star):
             yield event.plain_result(f"⚠️ 无法使用屏幕观察：\n{err_msg}")
             return
 
-        debug_mode = self.config.get("debug", False)
+        debug_mode = self.debug
         try:
             if debug_mode:
                 logger.info("开始截图")
@@ -1869,7 +2107,7 @@ class ScreenCompanion(Star):
             yield event.plain_result(end_response)
         else:
             # 从非活动状态切换到活动状态
-            if not self.config.get("enabled", False):
+            if not self.enabled:
                 yield event.plain_result(
                     "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
                 )
@@ -1899,10 +2137,49 @@ class ScreenCompanion(Star):
         """管理自动观察屏幕任务"""
         pass
 
+    @filter.command("kpi")
+    async def kpi_preset_switch(self, event: AstrMessageEvent, preset_index: int = None):
+        """切换预设 /kpi [预设序号]"""
+        if preset_index is None:
+            async for result in self.kpi_presets(event):
+                yield result
+            return
+        
+        try:
+            preset_index = int(preset_index)
+        except ValueError:
+            yield event.plain_result("预设序号必须是数字。")
+            return
+        
+        if preset_index < 0:
+            self.current_preset_index = -1
+            self.plugin_config.current_preset_index = -1
+            yield event.plain_result("✅ 已切换到手动配置模式")
+            return
+        
+        if preset_index >= len(self.parsed_custom_presets):
+            yield event.plain_result(
+                f"预设{preset_index}不存在。\n"
+                f"当前有 {len(self.parsed_custom_presets)} 个预设。\n"
+                f"用法: /kpi y [序号] [间隔] [概率] 添加预设"
+            )
+            return
+        
+        self.current_preset_index = preset_index
+        self.plugin_config.current_preset_index = preset_index
+        
+        if preset_index < len(self.parsed_custom_presets):
+            preset = self.parsed_custom_presets[preset_index]
+            yield event.plain_result(
+                f"✅ 已切换到预设{preset_index}：{preset['name']}，{preset['check_interval']}秒间隔，{preset['trigger_probability']}%触发概率"
+            )
+        else:
+            yield event.plain_result(f"预设{preset_index}不存在。")
+
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):
         """启动自动观察任务"""
-        if not self.config.get("enabled", False):
+        if not self.enabled:
             yield event.plain_result(
                 "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
             )
@@ -1992,11 +2269,84 @@ class ScreenCompanion(Star):
                 msg += f"- {task_id}\n"
             yield event.plain_result(msg)
 
+    @kpi_group.command("y")
+    async def kpi_y(self, event: AstrMessageEvent, preset_index: int = None, interval: int = None, probability: int = None):
+        """添加或修改自定义预设 /kpi y [预设序号] [间隔秒数] [触发概率]"""
+        if preset_index is None:
+            yield event.plain_result(
+                "用法: /kpi y [预设序号] [间隔秒数] [触发概率]\n"
+                "例如: /kpi y 1 90 30 表示设置预设1为90秒间隔30%概率触发"
+            )
+            return
+        
+        if interval is None or probability is None:
+            yield event.plain_result(
+                "用法: /kpi y [预设序号] [间隔秒数] [触发概率]\n"
+                "例如: /kpi y 1 90 30 表示设置预设1为90秒间隔30%概率触发"
+            )
+            return
+        
+        if preset_index < 0:
+            yield event.plain_result("预设序号不能为负数。")
+            return
+        
+        interval = max(10, int(interval))
+        probability = max(0, min(100, int(probability)))
+        
+        lines = []
+        if self.custom_presets:
+            lines = self.custom_presets.strip().split('\n')
+        
+        preset_name = f"预设{preset_index}"
+        new_preset = f"{preset_name}|{interval}|{probability}"
+        
+        while len(lines) <= preset_index:
+            lines.append("")
+        
+        lines[preset_index] = new_preset
+        
+        self.custom_presets = "\n".join(lines)
+        self.plugin_config.custom_presets = self.custom_presets
+        
+        self._parse_custom_presets()
+        
+        yield event.plain_result(
+            f"✅ 已设置预设{preset_index}：{interval}秒检查一次，{probability}%概率触发窥屏"
+        )
+
+    @kpi_group.command("presets")
+    async def kpi_presets(self, event: AstrMessageEvent):
+        """列出所有自定义预设 /kpi presets"""
+        if not self.parsed_custom_presets:
+            yield event.plain_result(
+                "当前没有设置任何自定义预设。\n"
+                "用法: /kpi y [预设序号] [间隔秒数] [触发概率]\n"
+                "例如: /kpi y 1 90 30"
+            )
+            return
+        
+        msg = "当前自定义预设：\n"
+        for i, preset in enumerate(self.parsed_custom_presets):
+            current_marker = ""
+            if i == self.current_preset_index:
+                current_marker = " ← 当前使用"
+            msg += f"{i}. {preset['name']}: {preset['check_interval']}秒间隔, {preset['trigger_probability']}%触发概率{current_marker}\n"
+        
+        msg += f"\n当前使用: {'预设' + str(self.current_preset_index) if self.current_preset_index >= 0 else '手动配置'}"
+        msg += f"\n切换预设: /kpi [预设序号] (如 /kpi 0)"
+        yield event.plain_result(msg)
+
+    @kpi_group.command("p")
+    async def kpi_p(self, event: AstrMessageEvent):
+        """列出所有自定义预设（简化版）/kpi p"""
+        async for result in self.kpi_presets(event):
+            yield result
+
     @kpi_group.command("add")
     async def kpi_add(self, event: AstrMessageEvent, interval: int, *prompt):
         """添加自定义观察任务"""
         # 检查enabled配置
-        if not self.config.get("enabled", False):
+        if not self.enabled:
             yield event.plain_result(
                 "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
             )
@@ -2138,7 +2488,7 @@ class ScreenCompanion(Star):
                 task = asyncio.create_task(recall_message())
                 self.background_tasks.append(task)
 
-            send_as_image = self.config.get("diary_send_as_image", False)
+            send_as_image = self.diary_send_as_image
             
             if send_as_image:
                 try:
@@ -2319,7 +2669,7 @@ class ScreenCompanion(Star):
                         diary_text = diary_text[:497] + "..."
                     diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
             
-            send_as_image = self.config.get("diary_send_as_image", False)
+            send_as_image = self.diary_send_as_image
             
             if send_as_image:
                 try:
@@ -2378,20 +2728,39 @@ class ScreenCompanion(Star):
         """切换调试模式 /kpi debug [on/off]"""
         if status is None:
             # 显示当前状态
-            current_status = self.config.get("debug", False)
+            current_status = self.debug
             status_text = "开启" if current_status else "关闭"
             yield event.plain_result(f"当前调试模式状态：{status_text}")
             return
         
         status = status.lower()
         if status == "on":
-            self.config["debug"] = True
+            self.plugin_config.debug = True
             yield event.plain_result("调试模式已开启，将显示详细日志")
         elif status == "off":
-            self.config["debug"] = False
+            self.plugin_config.debug = False
             yield event.plain_result("调试模式已关闭，将隐藏大部分日志")
         else:
             yield event.plain_result("用法: /kpi debug [on/off]")
+
+    @kpi_group.command("webui")
+    async def kpi_webui(self, event: AstrMessageEvent, action: str = "start"):
+        """控制 Web UI /kpi webui [start/stop]"""
+        if action.lower() == "start":
+            if self.web_server:
+                yield event.plain_result("⚠️ Web UI 已经在运行中")
+            else:
+                await self._start_webui()
+                yield event.plain_result(f"✅ Web UI 已启动，访问地址: http://127.0.0.1:{self.webui_port}")
+        elif action.lower() == "stop":
+            if not self.web_server:
+                yield event.plain_result("⚠️ Web UI 未运行")
+            else:
+                await self._stop_webui()
+                self.web_server = None
+                yield event.plain_result("✅ Web UI 已停止")
+        else:
+            yield event.plain_result("❌ 无效的操作，使用 /kpi webui start 或 /kpi webui stop")
 
     @kpi_group.command("complete")
     async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
@@ -2526,8 +2895,8 @@ class ScreenCompanion(Star):
 
     def _is_in_active_time_range(self):
         """检查当前时间是否在设定的活跃时间段内"""
-        # 使用记录的活跃时间段
-        time_range = self.last_active_time_range
+        # 使用配置的活跃时间段
+        time_range = self.active_time_range
 
         if not time_range:
             return True
@@ -2723,6 +3092,24 @@ class ScreenCompanion(Star):
             logger.error(f"加载学习数据失败: {e}")
             self.learning_data = {}
 
+    async def _start_webui(self):
+        """启动 Web UI 服务器"""
+        try:
+            self.web_server = WebServer(self, host=self.webui_host, port=self.webui_port)
+            success = await self.web_server.start()
+            if not success:
+                logger.error("Web UI 启动失败")
+        except Exception as e:
+            logger.error(f"启动 Web UI 时出错: {e}")
+
+    async def _stop_webui(self):
+        """停止 Web UI 服务器"""
+        if self.web_server:
+            try:
+                await self.web_server.stop()
+            except Exception as e:
+                logger.error(f"停止 Web UI 时出错: {e}")
+
     def _save_learning_data(self):
         """保存学习数据"""
         if not self.enable_learning:
@@ -2775,14 +3162,17 @@ class ScreenCompanion(Star):
                 # 在句中添加
                 sentences = response.split('。')
                 if sentences:
-                    target_sentence = random.choice(sentences)
+                    # 随机选择一个句子并保存其索引
+                    target_index = random.randint(0, len(sentences) - 1)
+                    target_sentence = sentences[target_index]
                     if target_sentence:
                         words = target_sentence.split(' ')
                         if len(words) > 1:
                             insert_pos = random.randint(0, len(words) - 1)
                             words.insert(insert_pos, uncertainty_word)
                             target_sentence = ' '.join(words)
-                        sentences[sentences.index(target_sentence)] = target_sentence
+                        # 使用保存的索引更新句子
+                        sentences[target_index] = target_sentence
                     response = '。'.join(sentences)
         
         return response
@@ -3043,13 +3433,13 @@ class ScreenCompanion(Star):
                                         self.unified_msg_origin = self._get_default_target()
 
                                     def _get_default_target(self):
-                                        admin_qq = self.config.get("admin_qq", "")
+                                        admin_qq = self.admin_qq
                                         if admin_qq:
                                             return f"aiocqhttp:FriendMessage:{admin_qq}"
                                         return ""
 
                                 # 绑定config到VirtualEvent
-                                VirtualEvent.config = self.config
+                                VirtualEvent.config = self.plugin_config
 
                                 event = VirtualEvent()
 
@@ -3068,9 +3458,9 @@ class ScreenCompanion(Star):
                                 )
 
                                 # 确定消息发送目标
-                                target = self.config.get("proactive_target", "")
+                                target = self.proactive_target
                                 if not target:
-                                    admin_qq = self.config.get("admin_qq", "")
+                                    admin_qq = self.admin_qq
                                     if admin_qq:
                                         target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
@@ -3162,9 +3552,9 @@ class ScreenCompanion(Star):
                                     )
 
                                     # 确定消息发送目标
-                                    target = self.config.get("proactive_target", "")
+                                    target = self.proactive_target
                                     if not target:
-                                        admin_qq = self.config.get("admin_qq", "")
+                                        admin_qq = self.admin_qq
                                         if admin_qq:
                                             target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
@@ -3268,78 +3658,19 @@ class ScreenCompanion(Star):
                         self.state = "inactive"
                     break
 
-                # 检查互动模式和参数变化
-                current_interaction_mode = self.config.get("interaction_mode", "自定义")
-                current_check_interval = self.config.get("check_interval", 300)
-                current_trigger_probability = self.config.get("trigger_probability", 30)
-                current_active_time_range = self.config.get("active_time_range", "")
+                # 获取当前预设参数
+                current_check_interval, current_trigger_probability = self._get_current_preset_params()
+                
+                # 使用预设参数
+                check_interval = current_check_interval
+                probability = current_trigger_probability
 
-                # 检查互动模式是否改变
-                if current_interaction_mode != self.last_interaction_mode:
-                    logger.info(
-                        f"[任务 {task_id}] 检测到互动模式从 {self.last_interaction_mode} 切换到 {current_interaction_mode}"
-                    )
-
-                    # 如果切换到预设模式，自动应用预设参数
-                    if current_interaction_mode in self.mode_settings:
-                        preset = self.mode_settings[current_interaction_mode]
-                        logger.info(
-                            f"[任务 {task_id}] 应用 {current_interaction_mode} 的预设参数"
-                        )
-
-                        # 更新配置为预设参数（这里只是更新内存中的状态，不修改配置文件）
-                        self.last_check_interval = preset["check_interval"]
-                        self.last_trigger_probability = preset["trigger_probability"]
-                        self.last_active_time_range = preset["active_time_range"]
-                    else:
-                        # 切换到自定义模式，使用当前配置的参数
-                        self.last_check_interval = current_check_interval
-                        self.last_trigger_probability = current_trigger_probability
-                        self.last_active_time_range = current_active_time_range
-
-                    self.last_interaction_mode = current_interaction_mode
-                else:
-                    # 互动模式没有改变，检查参数是否被修改
-                    if current_interaction_mode in self.mode_settings:
-                        # 当前是预设模式，检查参数是否与预设一致
-                        preset = self.mode_settings[current_interaction_mode]
-                        params_changed = False
-
-                        if (
-                            current_check_interval != self.last_check_interval
-                            or current_trigger_probability
-                            != self.last_trigger_probability
-                            or current_active_time_range != self.last_active_time_range
-                        ):
-                            params_changed = True
-
-                        if params_changed:
-                            logger.info(
-                                f"[任务 {task_id}] 检测到预设模式下参数被修改，自动切换到自定义模式"
-                            )
-                            # 更新状态，使用当前配置的参数
-                            self.last_interaction_mode = "自定义"
-                            self.last_check_interval = current_check_interval
-                            self.last_trigger_probability = current_trigger_probability
-                            self.last_active_time_range = current_active_time_range
-
-                # 首先检查是否有自定义间隔
+                # 首先检查是否有自定义间隔（任务级别的覆盖）
                 if interval is not None:
                     check_interval = interval
                     logger.info(f"[任务 {task_id}] 使用自定义间隔: {check_interval} 秒")
                 else:
-                    # 使用记录的参数
-                    check_interval = self.last_check_interval
-                    interaction_mode = self.last_interaction_mode
-
-                    if interaction_mode in self.mode_settings:
-                        logger.info(
-                            f"[任务 {task_id}] 使用{interaction_mode}：检查间隔 {check_interval} 秒"
-                        )
-                    else:
-                        logger.info(
-                            f"[任务 {task_id}] 使用自定义模式：检查间隔 {check_interval} 秒"
-                        )
+                    logger.info(f"[任务 {task_id}] 使用检查间隔: {check_interval} 秒")
 
                 # 等待检查间隔，期间定期检查is_running标志和任务取消状态
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进行触发判定")
@@ -3349,21 +3680,23 @@ class ScreenCompanion(Star):
                         logger.info(f"[任务 {task_id}] 检测到停止标志或状态变更，退出等待")
                         break
                     try:
-                        if elapsed % 10 == 0 and interval is None:
-                            new_interaction_mode = self.config.get(
-                                "interaction_mode", "自定义"
-                            )
-                            if new_interaction_mode != interaction_mode:
-                                interaction_mode = new_interaction_mode
-                                if interaction_mode in self.mode_settings:
-                                    new_check_interval = self.mode_settings[interaction_mode][
-                                        "check_interval"
-                                    ]
-                                    if new_check_interval != check_interval:
-                                        check_interval = new_check_interval
-                                        logger.info(
-                                            f"[任务 {task_id}] 互动模式已改变为{interaction_mode}，更新检查间隔为 {check_interval} 秒"
-                                        )
+                        if elapsed > 0 and elapsed % 10 == 0 and interval is None:
+                            new_check_interval, new_probability = self._get_current_preset_params()
+                            if new_check_interval != check_interval:
+                                check_interval = new_check_interval
+                                logger.info(
+                                    f"[任务 {task_id}] 预设参数已更新，检查间隔为 {check_interval} 秒"
+                                )
+                                if elapsed >= check_interval:
+                                    logger.info(
+                                        f"[任务 {task_id}] 新间隔已生效，提前进行触发判定"
+                                    )
+                                    break
+                            if new_probability != probability:
+                                probability = new_probability
+                                logger.info(
+                                    f"[任务 {task_id}] 预设参数已更新，触发概率为 {probability}%"
+                                )
                         await asyncio.sleep(1)
                         elapsed += 1
                     except asyncio.CancelledError:
@@ -3417,21 +3750,13 @@ class ScreenCompanion(Star):
                     trigger = True
                     logger.info(f"[任务 {task_id}] 系统资源使用高，强制触发窥屏")
                 else:
-                    # 使用记录的互动模式和触发概率
-                    interaction_mode = self.last_interaction_mode
-                    probability = self.last_trigger_probability
-
+                    # 获取当前预设参数
+                    check_interval, probability = self._get_current_preset_params()
+                    
                     # 进行触发判定
                     import random
 
-                    if interaction_mode in self.mode_settings:
-                        logger.info(
-                            f"[任务 {task_id}] 使用{interaction_mode}：触发概率 {probability}%"
-                        )
-                    else:
-                        logger.info(
-                            f"[任务 {task_id}] 使用自定义模式：触发概率 {probability}%"
-                        )
+                    logger.info(f"[任务 {task_id}] 触发概率 {probability}%")
 
                     logger.info(f"[任务 {task_id}] 开始进行触发判定")
                     # 生成随机数，判断是否触发
@@ -3516,9 +3841,9 @@ class ScreenCompanion(Star):
                             chain.chain.append(comp)
 
                         # 确定消息发送目标
-                        target = self.config.get("proactive_target", "")
+                        target = self.proactive_target
                         if not target:
-                            admin_qq = self.config.get("admin_qq", "")
+                            admin_qq = self.admin_qq
                             if admin_qq:
                                 # 使用管理员QQ号构建目标
                                 target = f"aiocqhttp:FriendMessage:{admin_qq}"

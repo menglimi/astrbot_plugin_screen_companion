@@ -26,14 +26,10 @@
   "interaction_mode": {
     "description": "互动模式",
     "type": "string",
-    "hint": "选择预设的互动模式：\n1. 轻度互动模式：检查间隔180秒，触发概率3%，适合日常使用\n2. 中度互动模式：检查间隔60秒，触发概率8%，适合直播/录屏陪伴\n3. 高频互动模式：检查间隔30秒，触发概率20%，适合测试/整活\n4. 静默模式：检查间隔300秒，触发概率1%，只在特定时段活跃\n选择自定义则使用下方手动配置的参数。",
+    "hint": "选择'自定义'使用下方手动配置的参数。",
     "default": "自定义",
-    "options": [
-      "自定义",
-      "轻度互动模式",
-      "中度互动模式",
-      "高频互动模式",
-      "静默模式"
+    "enum": [
+      "自定义"
     ],
     "condition": {
       "enabled": true
@@ -46,8 +42,7 @@
     "default": 300,
     "obvious_hint": true,
     "condition": {
-      "enabled": true,
-      "interaction_mode": "自定义"
+      "enabled": true
     }
   },
   "trigger_probability": {
@@ -57,8 +52,7 @@
     "default": 30,
     "obvious_hint": true,
     "condition": {
-      "enabled": true,
-      "interaction_mode": "自定义"
+      "enabled": true
     }
   },
   "active_time_range": {
@@ -71,12 +65,33 @@
       "enabled": true
     }
   },
+  "custom_presets": {
+    "description": "自定义预设",
+    "type": "text",
+    "hint": "设置自定义互动预设，格式：预设名称|检查间隔(秒)|触发概率(%)，每行一个预设。例如：\n我的预设1|90|30\n高频模式|30|50",
+    "default": "",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "current_preset_index": {
+    "description": "当前使用的预设",
+    "type": "int",
+    "hint": "选择当前使用的预设序号（从0开始），-1表示使用手动配置的参数。",
+    "default": -1,
+    "obvious_hint": true,
+    "condition": {
+      "enabled": true
+    }
+  },
   "watch_mode": {
     "description": "观察模式",
     "type": "string",
     "hint": "选择'观看'模式（正常观察）或'偷看'模式（偷偷瞄了一眼）。",
     "default": "偷看",
-    "options": [
+    "enum": [
       "观看",
       "偷看"
     ],
@@ -89,7 +104,7 @@
     "type": "string",
     "hint": "选择截取全屏还是活动窗口（注：部分系统环境下活动窗口模式可能失效）。",
     "default": "fullscreen",
-    "options": [
+    "enum": [
       "fullscreen",
       "active_window"
     ],
@@ -174,7 +189,7 @@
     "type": "string",
     "hint": "选择使用预设回复还是 LLM 生成回复",
     "default": "llm",
-    "options": ["preset", "llm"],
+    "enum": ["preset", "llm"],
     "condition": {
       "enabled": true
     }
@@ -426,12 +441,54 @@
     "type": "int",
     "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
     "default": 3,
-    "options": [1, 2, 3, 4, 5]
+    "enum": [1, 2, 3, 4, 5]
   },
   "debug": {
     "description": "调试模式",
     "type": "bool",
     "hint": "开启后显示详细日志，关闭时隐藏大部分日志",
     "default": false
+  },
+  "webui": {
+    "description": "Web UI 配置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 Web UI",
+        "type": "bool",
+        "hint": "开启后启动 Web UI 服务器，可通过浏览器访问观察记录和日记",
+        "default": false
+      },
+      "host": {
+        "description": "Web UI 主机",
+        "type": "string",
+        "hint": "Web UI 服务器监听的主机地址，0.0.0.0 表示所有网络接口",
+        "default": "0.0.0.0"
+      },
+      "port": {
+        "description": "Web UI 端口",
+        "type": "int",
+        "hint": "Web UI 服务器监听的端口",
+        "default": 8898
+      },
+      "auth_enabled": {
+        "description": "启用 Web UI 认证",
+        "type": "bool",
+        "hint": "开启后访问 Web UI 需要输入密码",
+        "default": true
+      },
+      "password": {
+        "description": "Web UI 密码",
+        "type": "string",
+        "hint": "访问 Web UI 时需要输入的密码，留空表示不需要密码",
+        "default": ""
+      },
+      "session_timeout": {
+        "description": "Web UI 会话超时",
+        "type": "int",
+        "hint": "Web UI 会话的超时时间（秒）",
+        "default": 3600
+      }
+    }
   }
 }
