@@ -3,12 +3,12 @@
 ## 插件简介
 `astrbot_plugin_screen_companion` 是一款智能屏幕观察插件，通过截图分析和环境感知，为用户提供个性化的互动体验。它不仅能观察用户的屏幕活动，还能感知环境变化，如系统状态、天气情况和节假日，甚至能监听麦克风音量，为用户提供全方位的智能陪伴。
 
-**版本：2.0.1**
+**版本：2.1.0**
 **GitHub 仓库：** [https://github.com/menglimi/astrbot_plugin_screen_companion](https://github.com/menglimi/astrbot_plugin_screen_companion)
 
 ---
 
-## 支持的环境
+## 支持的环境（只推荐本地部署）
 - Windows 桌面环境：需要授予屏幕录制权限
 - macOS 桌面环境：需要授予屏幕录制权限
 - 带桌面的Linux环境：需要图形界面支持
@@ -109,6 +109,17 @@
 
 ## 版本更新
 
+### 2.1.0 (2026-03-07)
+- **电量感知增强**：优化了电池状态检测功能，提供更精确的电量信息和充电状态提示
+- **自我学习系统**：增强了学习能力，能够从用户的反馈和行为模式中更智能地调整互动方式
+- **记忆优化**：改进了长期记忆系统，实现了记忆衰减、关联和优先级管理，提供更个性化的互动体验
+- **智能场景识别**：增强了场景识别能力，能够更准确地识别用户当前的活动和环境
+- **多模态支持**：优化了视觉和语言模型的集成，提供更丰富的互动方式
+- **性能优化**：优化了截图和图像处理流程，减少了系统资源占用
+- **稳定性提升**：修复了多个潜在的崩溃和错误情况，提高了插件的稳定性
+- **用户体验优化**：改进了交互流程和反馈机制，提供更流畅的用户体验
+- **配置灵活性**：增加了更多可配置选项，让用户可以更精细地调整插件行为
+
 ### 2.0.1 (2026-03-07)
 - **状态管理优化**：实现了三种状态（活动、非活动、临时任务）的管理
 - **任务冲突修复**：解决了任务无法结束的问题
@@ -141,3 +152,72 @@
 - **开发者**：[@menglimi](https://github.com/menglimi)
 - **QQ**：995051631
 - **喜欢的话请点个⭐**
+
+## Docker 运行方法（不推荐）
+
+### 挑战
+1. **硬件访问**：插件需要访问屏幕和麦克风
+2. **图形界面**：需要运行在有桌面环境的容器中
+3. **权限**：需要适当的权限来访问硬件资源
+
+### 解决方案
+
+#### 1. 创建 Dockerfile
+```dockerfile
+FROM ubuntu:22.04
+
+# 安装必要的依赖
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    xvfb \
+    x11-apps \
+    libxext6 \
+    libxrender1 \
+    libxtst6 \
+    libasound2 \
+    libpulse0
+
+# 安装 Python 依赖
+COPY requirements.txt /app/
+RUN pip3 install -r /app/requirements.txt
+
+# 复制插件代码
+COPY . /app/
+
+# 设置工作目录
+WORKDIR /app
+
+# 启动命令
+CMD ["python3", "main.py"]
+```
+
+#### 2. 创建 docker-compose.yml
+```yaml
+version: '3'
+
+services:
+  screen_companion:
+    build: .
+    privileged: true
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/snd:/dev/snd
+    environment:
+      - DISPLAY=$DISPLAY
+    devices:
+      - /dev/video0:/dev/video0
+```
+
+#### 3. 运行容器
+```bash
+docker-compose up -d
+```
+
+### 注意事项
+- 这种方法可能在不同的系统上有不同的表现
+- 可能需要根据具体的主机环境调整配置
+- 某些功能（如麦克风监听）可能在容器中受限
+- 建议在开发环境中测试，确保所有功能正常工作
+
+需要注意的是，由于该插件的特性，在 Docker 中运行可能无法获得与原生环境相同的体验，特别是在屏幕截图和硬件访问方面。

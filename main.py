@@ -111,6 +111,55 @@ class ScreenCompanion(Star):
             self.learning_storage = str(StarTools.get_data_dir() / "learning")
         os.makedirs(self.learning_storage, exist_ok=True)
 
+        # 观察记录相关
+        self.observation_storage = self.config.get("observation_storage", "")
+        self.max_observations = self.config.get("max_observations", 5)  # 最大保存的观察记录数
+        self.observations = []  # 存储观察记录
+
+        # 初始化观察记录存储路径
+        if not self.observation_storage:
+            self.observation_storage = str(StarTools.get_data_dir() / "observations")
+        os.makedirs(self.observation_storage, exist_ok=True)
+
+        # 加载观察记录
+        self._load_observations()
+
+        # 日记元数据相关（记录日记查看状态）
+        self.diary_metadata = {}
+        self.diary_metadata_file = os.path.join(self.diary_storage, "diary_metadata.json")
+        self._load_diary_metadata()
+
+        # 长期记忆系统
+        self.long_term_memory = {}
+        self.long_term_memory_file = os.path.join(self.learning_storage, "long_term_memory.json")
+        self._load_long_term_memory()
+
+        # 互动频率管理
+        self.interaction_frequency = self.config.get("interaction_frequency", 5)  # 基础互动频率
+        self.user_engagement = 5  # 用户参与度，范围1-10，默认5
+        self.engagement_history = []  # 记录用户参与度历史
+
+        # 情绪词汇和语气词
+        self.emotion_words = {
+            "happy": ["真好", "太棒了", "开心", "高兴", "兴奋", "不错", "很棒", "厉害"],
+            "concerned": ["担心", "注意", "小心", "提醒", "建议"],
+            "curious": ["好奇", "想知道", "有意思", "有趣", "奇怪"],
+            "encouraging": ["加油", "努力", "坚持", "相信你", "做得好"],
+            "casual": ["嗯", "哦", "对了", "你知道吗", "话说", "其实", "不过", "对啦"],
+            "surprised": ["哇", "天哪", "真的吗", "没想到", "太意外了"]
+        }
+
+        # 任务完成检测
+        self.active_tasks = {}  # 记录用户正在进行的任务
+
+        # 学习反馈系统
+        self.corrections = {}  # 记录用户纠正的错误
+        self.corrections_file = os.path.join(self.learning_storage, "corrections.json")
+        self._load_corrections()
+
+        # 不确定性表达词汇
+        self.uncertainty_words = ["可能", "好像", "我记得", "似乎", "大概", "也许", "说不定", "感觉"]
+
         # 解析用户偏好设置
         self._parse_user_preferences()
 
@@ -138,6 +187,441 @@ class ScreenCompanion(Star):
         # 启动麦克风监听任务
         task = asyncio.create_task(self._mic_monitor_task())
         self.background_tasks.append(task)
+
+    def _load_observations(self):
+        """加载观察记录"""
+        try:
+            import json
+            import os
+            observations_file = os.path.join(self.observation_storage, "observations.json")
+            if os.path.exists(observations_file):
+                with open(observations_file, "r", encoding="utf-8") as f:
+                    self.observations = json.load(f)
+                    # 确保只保留最新的max_observations条记录
+                    if len(self.observations) > self.max_observations:
+                        self.observations = self.observations[-self.max_observations:]
+        except Exception as e:
+            logger.error(f"加载观察记录失败: {e}")
+            self.observations = []
+
+    def _save_observations(self):
+        """保存观察记录"""
+        try:
+            import json
+            import os
+            observations_file = os.path.join(self.observation_storage, "observations.json")
+            # 确保只保存最新的max_observations条记录
+            if len(self.observations) > self.max_observations:
+                self.observations = self.observations[-self.max_observations:]
+            with open(observations_file, "w", encoding="utf-8") as f:
+                json.dump(self.observations, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存观察记录失败: {e}")
+
+    def _add_observation(self, scene, recognition_text, active_window_title):
+        """添加观察记录"""
+        import datetime
+        observation = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "scene": scene,
+            "window_title": active_window_title,
+            "description": recognition_text[:200]  # 只保存前200个字符
+        }
+        self.observations.append(observation)
+        # 确保只保留最新的max_observations条记录
+        if len(self.observations) > self.max_observations:
+            self.observations = self.observations[-self.max_observations:]
+        # 保存到文件
+        self._save_observations()
+
+    def _load_diary_metadata(self):
+        """加载日记元数据"""
+        try:
+            import json
+            import os
+            if os.path.exists(self.diary_metadata_file):
+                with open(self.diary_metadata_file, "r", encoding="utf-8") as f:
+                    self.diary_metadata = json.load(f)
+        except Exception as e:
+            logger.error(f"加载日记元数据失败: {e}")
+            self.diary_metadata = {}
+
+    def _save_diary_metadata(self):
+        """保存日记元数据"""
+        try:
+            import json
+            import os
+            with open(self.diary_metadata_file, "w", encoding="utf-8") as f:
+                json.dump(self.diary_metadata, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存日记元数据失败: {e}")
+
+    def _update_diary_view_status(self, date_str):
+        """更新日记查看状态"""
+        import datetime
+        if date_str not in self.diary_metadata:
+            self.diary_metadata[date_str] = {}
+        self.diary_metadata[date_str]["viewed"] = True
+        self.diary_metadata[date_str]["viewed_at"] = datetime.datetime.now().isoformat()
+        self._save_diary_metadata()
+        logger.info(f"更新日记查看状态: {date_str} - 已查看")
+
+    def _load_long_term_memory(self):
+        """加载长期记忆"""
+        try:
+            import json
+            import os
+            if os.path.exists(self.long_term_memory_file):
+                with open(self.long_term_memory_file, "r", encoding="utf-8") as f:
+                    self.long_term_memory = json.load(f)
+                logger.info("长期记忆加载成功")
+        except Exception as e:
+            logger.error(f"加载长期记忆失败: {e}")
+            self.long_term_memory = {}
+
+    def _save_long_term_memory(self):
+        """保存长期记忆"""
+        try:
+            import json
+            import os
+            with open(self.long_term_memory_file, "w", encoding="utf-8") as f:
+                json.dump(self.long_term_memory, f, ensure_ascii=False, indent=2)
+            logger.info("长期记忆保存成功")
+        except Exception as e:
+            logger.error(f"保存长期记忆失败: {e}")
+
+    def _update_long_term_memory(self, scene, active_window, duration, user_preferences=None):
+        """更新长期记忆"""
+        import datetime
+        today = datetime.date.today().isoformat()
+        
+        # 初始化记忆结构
+        if "applications" not in self.long_term_memory:
+            self.long_term_memory["applications"] = {}
+        if "scenes" not in self.long_term_memory:
+            self.long_term_memory["scenes"] = {}
+        if "user_preferences" not in self.long_term_memory:
+            self.long_term_memory["user_preferences"] = {
+                "music": {},
+                "movies": {},
+                "food": {},
+                "hobbies": {},
+                "other": {}
+            }
+        if "memory_associations" not in self.long_term_memory:
+            self.long_term_memory["memory_associations"] = {}
+        if "memory_priorities" not in self.long_term_memory:
+            self.long_term_memory["memory_priorities"] = {}
+        
+        # 更新应用使用频率
+        app_name = active_window.split(" - ")[-1] if " - " in active_window else active_window
+        if app_name not in self.long_term_memory["applications"]:
+            self.long_term_memory["applications"][app_name] = {
+                "usage_count": 0,
+                "total_duration": 0,
+                "last_used": today,
+                "scenes": {},
+                "priority": 0
+            }
+        
+        app_memory = self.long_term_memory["applications"][app_name]
+        app_memory["usage_count"] += 1
+        app_memory["total_duration"] += duration
+        app_memory["last_used"] = today
+        
+        if scene not in app_memory["scenes"]:
+            app_memory["scenes"][scene] = 0
+        app_memory["scenes"][scene] += 1
+        
+        # 更新场景偏好
+        if scene not in self.long_term_memory["scenes"]:
+            self.long_term_memory["scenes"][scene] = {
+                "usage_count": 0,
+                "last_used": today,
+                "priority": 0
+            }
+        self.long_term_memory["scenes"][scene]["usage_count"] += 1
+        self.long_term_memory["scenes"][scene]["last_used"] = today
+        
+        # 更新用户偏好（如果提供）
+        if user_preferences:
+            for category, preferences in user_preferences.items():
+                if category not in self.long_term_memory["user_preferences"]:
+                    self.long_term_memory["user_preferences"][category] = {}
+                for pref, value in preferences.items():
+                    if pref not in self.long_term_memory["user_preferences"][category]:
+                        self.long_term_memory["user_preferences"][category][pref] = {
+                            "count": 0,
+                            "last_mentioned": today,
+                            "priority": 0
+                        }
+                    self.long_term_memory["user_preferences"][category][pref]["count"] += 1
+                    self.long_term_memory["user_preferences"][category][pref]["last_mentioned"] = today
+        
+        # 建立记忆关联
+        self._build_memory_associations(scene, app_name)
+        
+        # 更新记忆优先级
+        self._update_memory_priorities()
+        
+        # 应用记忆衰减
+        self._apply_memory_decay()
+        
+        # 保存长期记忆
+        self._save_long_term_memory()
+
+    def _apply_memory_decay(self):
+        """应用记忆衰减"""
+        import datetime
+        today = datetime.date.today()
+        
+        # 对应用记忆应用衰减
+        if "applications" in self.long_term_memory:
+            for app_name, app_data in list(self.long_term_memory["applications"].items()):
+                last_used_date = datetime.date.fromisoformat(app_data["last_used"])
+                days_since_used = (today - last_used_date).days
+                
+                # 记忆衰减：随着时间推移，使用频率和持续时间逐渐降低
+                if days_since_used > 0:
+                    decay_factor = 0.95 ** days_since_used
+                    app_data["usage_count"] = int(app_data["usage_count"] * decay_factor)
+                    app_data["total_duration"] = int(app_data["total_duration"] * decay_factor)
+                    app_data["priority"] = int(app_data["priority"] * decay_factor)
+                    
+                    # 如果记忆太弱，删除
+                    if app_data["usage_count"] < 1:
+                        del self.long_term_memory["applications"][app_name]
+        
+        # 对场景记忆应用衰减
+        if "scenes" in self.long_term_memory:
+            for scene_name, scene_data in list(self.long_term_memory["scenes"].items()):
+                last_used_date = datetime.date.fromisoformat(scene_data["last_used"])
+                days_since_used = (today - last_used_date).days
+                
+                if days_since_used > 0:
+                    decay_factor = 0.95 ** days_since_used
+                    scene_data["usage_count"] = int(scene_data["usage_count"] * decay_factor)
+                    scene_data["priority"] = int(scene_data["priority"] * decay_factor)
+                    
+                    if scene_data["usage_count"] < 1:
+                        del self.long_term_memory["scenes"][scene_name]
+        
+        # 对用户偏好应用衰减
+        if "user_preferences" in self.long_term_memory:
+            for category, preferences in list(self.long_term_memory["user_preferences"].items()):
+                for pref, data in list(preferences.items()):
+                    last_mentioned_date = datetime.date.fromisoformat(data["last_mentioned"])
+                    days_since_mentioned = (today - last_mentioned_date).days
+                    
+                    if days_since_mentioned > 0:
+                        decay_factor = 0.95 ** days_since_mentioned
+                        data["count"] = int(data["count"] * decay_factor)
+                        data["priority"] = int(data["priority"] * decay_factor)
+                        
+                        if data["count"] < 1:
+                            del preferences[pref]
+                
+                # 如果类别为空，删除
+                if not preferences:
+                    del self.long_term_memory["user_preferences"][category]
+
+    def _build_memory_associations(self, scene, app_name):
+        """建立记忆关联"""
+        import datetime
+        # 关联场景和应用
+        association_key = f"{scene}_{app_name}"
+        if association_key not in self.long_term_memory["memory_associations"]:
+            self.long_term_memory["memory_associations"][association_key] = {
+                "count": 0,
+                "last_occurred": datetime.date.today().isoformat()
+            }
+        
+        self.long_term_memory["memory_associations"][association_key]["count"] += 1
+        self.long_term_memory["memory_associations"][association_key]["last_occurred"] = datetime.date.today().isoformat()
+
+    def _update_memory_priorities(self):
+        """更新记忆优先级"""
+        import datetime
+        today = datetime.date.today()
+        
+        # 更新应用优先级
+        if "applications" in self.long_term_memory:
+            for app_name, app_data in self.long_term_memory["applications"].items():
+                # 基于使用频率和最近使用时间计算优先级
+                last_used_date = datetime.date.fromisoformat(app_data["last_used"])
+                days_since_used = (today - last_used_date).days
+                
+                # 优先级 = 使用频率 * (1 / (1 + 天数))
+                priority = app_data["usage_count"] * (1 / (1 + days_since_used))
+                app_data["priority"] = int(priority)
+        
+        # 更新场景优先级
+        if "scenes" in self.long_term_memory:
+            for scene_name, scene_data in self.long_term_memory["scenes"].items():
+                last_used_date = datetime.date.fromisoformat(scene_data["last_used"])
+                days_since_used = (today - last_used_date).days
+                
+                priority = scene_data["usage_count"] * (1 / (1 + days_since_used))
+                scene_data["priority"] = int(priority)
+        
+        # 更新用户偏好优先级
+        if "user_preferences" in self.long_term_memory:
+            for category, preferences in self.long_term_memory["user_preferences"].items():
+                for pref, data in preferences.items():
+                    last_mentioned_date = datetime.date.fromisoformat(data["last_mentioned"])
+                    days_since_mentioned = (today - last_mentioned_date).days
+                    
+                    priority = data["count"] * (1 / (1 + days_since_mentioned))
+                    data["priority"] = int(priority)
+
+    def _trigger_related_memories(self, scene, app_name):
+        """触发相关记忆"""
+        related_memories = []
+        
+        # 基于场景触发记忆
+        if "scenes" in self.long_term_memory and scene in self.long_term_memory["scenes"]:
+            scene_data = self.long_term_memory["scenes"][scene]
+            if scene_data["priority"] > 0:
+                related_memories.append(f"场景: {scene} (优先级: {scene_data['priority']})")
+        
+        # 基于应用触发记忆
+        if "applications" in self.long_term_memory and app_name in self.long_term_memory["applications"]:
+            app_data = self.long_term_memory["applications"][app_name]
+            if app_data["priority"] > 0:
+                related_memories.append(f"应用: {app_name} (优先级: {app_data['priority']})")
+        
+        # 基于关联触发记忆
+        association_key = f"{scene}_{app_name}"
+        if "memory_associations" in self.long_term_memory and association_key in self.long_term_memory["memory_associations"]:
+            association_data = self.long_term_memory["memory_associations"][association_key]
+            if association_data["count"] > 1:
+                related_memories.append(f"关联: {scene} 和 {app_name} (出现次数: {association_data['count']})")
+        
+        # 基于用户偏好触发记忆
+        if "user_preferences" in self.long_term_memory:
+            for category, preferences in self.long_term_memory["user_preferences"].items():
+                # 按优先级排序
+                sorted_prefs = sorted(preferences.items(), key=lambda x: x[1]["priority"], reverse=True)
+                # 取前3个高优先级的偏好
+                top_prefs = sorted_prefs[:3]
+                for pref, data in top_prefs:
+                    if data["priority"] > 0:
+                        related_memories.append(f"偏好: {category} - {pref} (优先级: {data['priority']})")
+        
+        return related_memories
+
+    def _add_user_preference(self, category, preference):
+        """添加用户偏好"""
+        import datetime
+        today = datetime.date.today().isoformat()
+        
+        if "user_preferences" not in self.long_term_memory:
+            self.long_term_memory["user_preferences"] = {
+                "music": {},
+                "movies": {},
+                "food": {},
+                "hobbies": {},
+                "other": {}
+            }
+        
+        if category not in self.long_term_memory["user_preferences"]:
+            self.long_term_memory["user_preferences"][category] = {}
+        
+        if preference not in self.long_term_memory["user_preferences"][category]:
+            self.long_term_memory["user_preferences"][category][preference] = {
+                "count": 0,
+                "last_mentioned": today,
+                "priority": 0
+            }
+        
+        self.long_term_memory["user_preferences"][category][preference]["count"] += 1
+        self.long_term_memory["user_preferences"][category][preference]["last_mentioned"] = today
+        
+        # 更新优先级
+        self._update_memory_priorities()
+        # 保存记忆
+        self._save_long_term_memory()
+        
+        logger.info(f"已添加用户偏好: {category} - {preference}")
+
+    def _detect_task_completion(self, scene, active_window):
+        """检测任务完成"""
+        import datetime
+        task_key = f"{scene}_{active_window}"
+        current_time = datetime.datetime.now()
+        
+        if task_key in self.active_tasks:
+            task_info = self.active_tasks[task_key]
+            start_time = task_info["start_time"]
+            duration = (current_time - start_time).total_seconds() / 60  # 转换为分钟
+            
+            # 如果任务持续时间超过5分钟，认为可能完成了一项任务
+            if duration > 5:
+                del self.active_tasks[task_key]
+                return True, duration
+        
+        # 记录新任务
+        self.active_tasks[task_key] = {
+            "start_time": current_time,
+            "scene": scene,
+            "window": active_window
+        }
+        return False, 0
+
+    def _adjust_interaction_frequency(self, user_response):
+        """根据用户回应调整互动频率"""
+        # 简单的参与度评估：根据回复长度和内容
+        response_length = len(user_response)
+        
+        # 评估用户参与度
+        if response_length > 50:
+            engagement = min(10, self.user_engagement + 1)
+        elif response_length < 10:
+            engagement = max(1, self.user_engagement - 1)
+        else:
+            engagement = self.user_engagement
+        
+        # 更新参与度历史
+        self.engagement_history.append(engagement)
+        if len(self.engagement_history) > 10:
+            self.engagement_history.pop(0)
+        
+        # 计算平均参与度
+        avg_engagement = sum(self.engagement_history) / len(self.engagement_history)
+        self.user_engagement = int(avg_engagement)
+        
+        # 根据参与度调整互动频率
+        # 参与度越高，互动频率越高
+        self.interaction_frequency = max(1, min(10, 5 + (self.user_engagement - 5) * 0.5))
+        logger.info(f"用户参与度: {self.user_engagement}, 互动频率: {self.interaction_frequency}")
+
+    def _add_emotion_words(self, response):
+        """在回复中添加情绪词汇和语气词"""
+        import random
+        
+        # 随机添加语气词
+        if random.random() < 0.3:
+            casual_words = self.emotion_words.get("casual", [])
+            if casual_words:
+                casual_word = random.choice(casual_words)
+                response = f"{casual_word}，{response}"
+        
+        # 根据场景添加情绪词汇
+        if "编程" in response or "代码" in response:
+            if random.random() < 0.4:
+                encouraging_words = self.emotion_words.get("encouraging", [])
+                if encouraging_words:
+                    encouraging_word = random.choice(encouraging_words)
+                    response = f"{response}，{encouraging_word}！"
+        
+        elif "游戏" in response or "玩" in response:
+            if random.random() < 0.4:
+                happy_words = self.emotion_words.get("happy", [])
+                if happy_words:
+                    happy_word = random.choice(happy_words)
+                    response = f"{happy_word}！{response}"
+        
+        return response
 
     async def stop(self):
         """停止插件，清理所有任务"""
@@ -479,55 +963,98 @@ class ScreenCompanion(Star):
         """返回值: (截图字节流, 活动窗口标题)"""
 
         def _core_task():
-            import pyautogui
+            import os
+            from PIL import Image
 
-            mode = self.config.get("capture_mode", "fullscreen")
-            screenshot = None
-            active_window_title = ""
-
-            # 仅在 Windows 环境尝试窗口捕捉
-            if mode == "active_window" and sys.platform == "win32":
+            # 共享目录路径，优先使用环境变量，默认值为/AstrBot/data/screenshots
+            import os
+            screenshots_dir = os.environ.get("SCREENSHOT_DIR", "/AstrBot/data/screenshots")
+            
+            # 检查共享目录是否存在
+            if not os.path.exists(screenshots_dir):
+                logger.error(f"共享目录不存在: {screenshots_dir}")
+                # 回退到容器内截图（如果支持）
                 try:
-                    import pygetwindow as gw
-
-                    window = gw.getActiveWindow()
-                    if window and window.width > 0 and window.height > 0:
-                        active_window_title = window.title
-                        screenshot = pyautogui.screenshot(
-                            region=(
-                                window.left,
-                                window.top,
-                                window.width,
-                                window.height,
-                            )
-                        )
+                    import pyautogui
+                    screenshot = pyautogui.screenshot()
+                    if screenshot.mode != "RGB":
+                        screenshot = screenshot.convert("RGB")
+                    img_byte_arr = io.BytesIO()
+                    quality_val = self.config.get("image_quality", 70)
+                    try:
+                        quality = max(10, min(100, int(quality_val)))
+                    except (ValueError, TypeError):
+                        quality = 70
+                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
+                    return img_byte_arr.getvalue(), "容器内截图"
                 except Exception as e:
-                    logger.debug(f"窗口捕捉失败，回退至全屏: {e}")
-
-            if screenshot is None:
-                screenshot = pyautogui.screenshot()
-                # 尝试获取全屏时的活动窗口
+                    logger.error(f"容器内截图也失败: {e}")
+                    raise
+            
+            # 获取所有截图文件
+            screenshot_files = [f for f in os.listdir(screenshots_dir) if f.startswith("screenshot_") and f.endswith(".jpg")]
+            
+            if not screenshot_files:
+                logger.error("共享目录中没有截图文件")
+                # 回退到容器内截图（如果支持）
                 try:
-                    import pygetwindow as gw
-
-                    window = gw.getActiveWindow()
-                    if window:
-                        active_window_title = window.title
+                    import pyautogui
+                    screenshot = pyautogui.screenshot()
+                    if screenshot.mode != "RGB":
+                        screenshot = screenshot.convert("RGB")
+                    img_byte_arr = io.BytesIO()
+                    quality_val = self.config.get("image_quality", 70)
+                    try:
+                        quality = max(10, min(100, int(quality_val)))
+                    except (ValueError, TypeError):
+                        quality = 70
+                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
+                    return img_byte_arr.getvalue(), "容器内截图"
                 except Exception as e:
-                    logger.debug(f"获取活动窗口失败: {e}")
-
-            if screenshot.mode != "RGB":
-                screenshot = screenshot.convert("RGB")
-
-            img_byte_arr = io.BytesIO()
-            quality_val = self.config.get("image_quality", 70)
+                    logger.error(f"容器内截图也失败: {e}")
+                    raise
+            
+            # 按时间戳排序，获取最新的截图
+            screenshot_files.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
+            latest_screenshot = screenshot_files[0]
+            screenshot_path = os.path.join(screenshots_dir, latest_screenshot)
+            
+            logger.info(f"使用最新截图: {screenshot_path}")
+            
+            # 读取截图文件
             try:
-                quality = max(10, min(100, int(quality_val)))
-            except (ValueError, TypeError):
-                quality = 70
-
-            screenshot.save(img_byte_arr, format="JPEG", quality=quality)
-            return img_byte_arr.getvalue(), active_window_title
+                screenshot = Image.open(screenshot_path)
+                if screenshot.mode != "RGB":
+                    screenshot = screenshot.convert("RGB")
+                
+                img_byte_arr = io.BytesIO()
+                quality_val = self.config.get("image_quality", 70)
+                try:
+                    quality = max(10, min(100, int(quality_val)))
+                except (ValueError, TypeError):
+                    quality = 70
+                
+                screenshot.save(img_byte_arr, format="JPEG", quality=quality)
+                return img_byte_arr.getvalue(), "宿主机截图"
+            except Exception as e:
+                logger.error(f"读取截图文件失败: {e}")
+                # 回退到容器内截图（如果支持）
+                try:
+                    import pyautogui
+                    screenshot = pyautogui.screenshot()
+                    if screenshot.mode != "RGB":
+                        screenshot = screenshot.convert("RGB")
+                    img_byte_arr = io.BytesIO()
+                    quality_val = self.config.get("image_quality", 70)
+                    try:
+                        quality = max(10, min(100, int(quality_val)))
+                    except (ValueError, TypeError):
+                        quality = 70
+                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
+                    return img_byte_arr.getvalue(), "容器内截图"
+                except Exception as e:
+                    logger.error(f"容器内截图也失败: {e}")
+                    raise
 
         result = await asyncio.to_thread(_core_task)
         return result
@@ -868,9 +1395,16 @@ class ScreenCompanion(Star):
             cpu_percent = psutil.cpu_percent(interval=1)
             memory = psutil.virtual_memory()
             memory_percent = memory.percent
+            
+            # 电池状态检测
+            battery = psutil.sensors_battery()
+            if battery and battery.percent < 20:
+                system_prompt += "电池电量较低，建议及时充电。"
 
             if cpu_percent > 80 or memory_percent > 80:
-                system_prompt = "系统资源使用较高，建议休息一下，让电脑也放松放松。"
+                if system_prompt:
+                    system_prompt += " "
+                system_prompt += "系统资源使用较高，建议休息一下，让电脑也放松放松。"
                 system_high_load = True
                 logger.info(
                     f"系统资源使用较高: CPU={cpu_percent}%, 内存={memory_percent}%"
@@ -1047,6 +1581,9 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.debug(f"获取对话历史失败: {e}")
 
+            # 添加观察记录
+            self._add_observation(scene, recognition_text, active_window_title)
+            
             # 构建交互提示词
             interaction_prompt = f"用户的屏幕显示：{recognition_text}。"
             if custom_prompt:
@@ -1064,6 +1601,23 @@ class ScreenCompanion(Star):
                     interaction_prompt += f" {weather_prompt}"
                 if system_status_prompt:
                     interaction_prompt += f" {system_status_prompt}"
+            
+            # 触发相关记忆
+            related_memories = self._trigger_related_memories(scene, active_window_title)
+            if related_memories:
+                memory_text = "\n相关记忆："
+                for memory in related_memories[:5]:  # 最多显示5个记忆
+                    memory_text += f"\n- {memory}"
+                interaction_prompt += memory_text
+            
+            # 注入之前的观察记录
+            if self.observations:
+                recent_observations = self.observations[-self.max_observations:][::-1]  # 最近的记录在后面
+                observation_text = "\n最近的观察记录："
+                for obs in recent_observations:
+                    observation_text += f"\n- {obs['timestamp'].split('T')[1][:5]} {obs['scene']}: {obs['description']}"
+                interaction_prompt += observation_text
+            
             if scene == "视频" or scene == "阅读":
                 interaction_prompt += f" 请对屏幕内容进行深度分析和思考，对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。最多输出四句话，最好在三句话内完成回复。"
             else:
@@ -1099,6 +1653,29 @@ class ScreenCompanion(Star):
             else:
                 if debug_mode:
                     logger.warning("LLM 未返回有效互动回复")
+            
+            # 检测任务完成并给予鼓励
+            task_completed, duration = self._detect_task_completion(scene, active_window_title)
+            if task_completed:
+                # 添加鼓励性词汇
+                import random
+                encouraging_words = self.emotion_words.get("encouraging", [])
+                if encouraging_words:
+                    encouraging_word = random.choice(encouraging_words)
+                    response_text = f"{encouraging_word}！你完成了一项任务，真棒！" + " " + response_text
+            
+            # 更新长期记忆
+            self._update_long_term_memory(scene, active_window_title, 1)  # 假设每次互动持续1分钟
+            
+            # 在回复中添加情绪词汇和语气词
+            response_text = self._add_emotion_words(response_text)
+            
+            # 添加不确定性表达
+            response_text = self._add_uncertainty(response_text)
+            
+            # 调整互动频率（模拟用户回应，实际应根据真实回应调整）
+            # 这里使用一个简单的模拟，实际应用中应根据用户的真实回复调整
+            self._adjust_interaction_frequency(response_text)
 
         except Exception as e:
             logger.error(f"核心功能失败: {e}")
@@ -1304,7 +1881,7 @@ class ScreenCompanion(Star):
                 return
 
             # 检查是否已有自动化任务
-            if self.AUTO_TASK_ID in self.auto_tasks:
+            if self.AUTO_TASK_ID in self.auto_tasks or self.is_running:
                 logger.info("自动化任务已存在，无需重复启动")
                 return
 
@@ -1497,6 +2074,10 @@ class ScreenCompanion(Star):
         try:
             with open(diary_path, encoding="utf-8") as f:
                 diary_content = f.read()
+            
+            # 更新日记查看状态
+            date_str = target_date.strftime("%Y%m%d")
+            self._update_diary_view_status(date_str)
 
             # 提取感想部分
             summary_start = diary_content.find("## 今日感想")
@@ -1612,6 +2193,44 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"读取日记失败: {e}")
             yield event.plain_result("读取日记失败，请检查日志。")
+
+    @kpi_group.command("correct")
+    async def kpi_correct(self, event: AstrMessageEvent, *args):
+        """纠正Bot的错误 /kpi correct [原始回复] [纠正后的回复]"""
+        if len(args) < 2:
+            yield event.plain_result("用法: /kpi correct [原始回复] [纠正后的回复]")
+            return
+        
+        # 提取原始回复和纠正后的回复
+        original = args[0]
+        corrected = ' '.join(args[1:])
+        
+        # 记录纠正
+        self._learn_from_correction(original, corrected)
+        
+        yield event.plain_result("谢谢你的纠正，我会记住的！")
+
+    @kpi_group.command("preference")
+    async def kpi_preference(self, event: AstrMessageEvent, category: str, *preference):
+        """添加用户偏好 /kpi preference [类别] [偏好内容]"""
+        if not preference:
+            yield event.plain_result("用法: /kpi preference [类别] [偏好内容]")
+            yield event.plain_result("支持的类别: music, movies, food, hobbies, other")
+            return
+        
+        # 验证类别
+        valid_categories = ["music", "movies", "food", "hobbies", "other"]
+        if category not in valid_categories:
+            yield event.plain_result(f"无效的类别。支持的类别: {', '.join(valid_categories)}")
+            return
+        
+        # 提取偏好内容
+        preference_content = ' '.join(preference)
+        
+        # 添加偏好
+        self._add_user_preference(category, preference_content)
+        
+        yield event.plain_result(f"已添加偏好: {category} - {preference_content}")
 
     @kpi_group.command("recent")
     async def kpi_recent(self, event: AstrMessageEvent, days: int = 3):
@@ -1980,17 +2599,38 @@ class ScreenCompanion(Star):
             diary_content += f"### {entry['time']} - {entry['active_window']}\n"
             diary_content += f"{entry['content']}\n\n"
 
+        # 检查最近三次日记的查看状态
+        import datetime
+        viewed_count = 0
+        for i in range(1, 4):
+            past_date = today - datetime.timedelta(days=i)
+            past_date_str = past_date.strftime("%Y%m%d")
+            if past_date_str in self.diary_metadata and self.diary_metadata[past_date_str].get("viewed", False):
+                viewed_count += 1
+        
+        logger.info(f"最近三天日记查看状态: {viewed_count} 次被查看")
+
         # 生成风格化的总结
         provider = self.context.get_using_provider()
         if provider:
             if len(self.diary_entries) < 2:
                 summary_prompt = "今天用户几乎没有给你看屏幕，你想偷看他的日记却被他发现了。抱怨一下：屏幕都不给我看，还想偷看我的日记？字数控制在400字左右。"
             else:
-                summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。字数控制在400字左右。\n\n{diary_content}"
+                # 根据查看次数生成不同的提示词
+                if viewed_count == 0:
+                    # 没有查看过，正常生成日记
+                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。字数控制在400字左右。\n\n{diary_content}"
+                elif viewed_count == 1:
+                    # 查看过1次，感觉有些不对劲
+                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：你感觉有些不对劲，似乎有人偷看了你的日记。融入你的性格和情感，表达出这种微妙的不安感。字数控制在400字左右。\n\n{diary_content}"
+                elif viewed_count == 2:
+                    # 查看过2次，确信用户看过自己的日记
+                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：你确信用户看过你的日记，对此感到有些惊讶和好奇。融入你的性格和情感，表达出这种复杂的情绪。字数控制在400字左右。\n\n{diary_content}"
+                else:
+                    # 查看过3次，对这一行为表达自己的看法
+                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：用户已经多次偷看你的日记，你对此有自己的看法。融入你的性格和情感，表达出你对这一行为的态度和想法。字数控制在400字左右。\n\n{diary_content}"
 
                 if self.diary_reference_days > 0:
-                    import datetime
-
                     reference_days = []
                     for i in range(1, self.diary_reference_days + 1):
                         past_date = today - datetime.timedelta(days=i)
@@ -2095,6 +2735,72 @@ class ScreenCompanion(Star):
             logger.info("学习数据保存成功")
         except Exception as e:
             logger.error(f"保存学习数据失败: {e}")
+
+    def _load_corrections(self):
+        """加载用户纠正数据"""
+        try:
+            import json
+            import os
+            if os.path.exists(self.corrections_file):
+                with open(self.corrections_file, "r", encoding="utf-8") as f:
+                    self.corrections = json.load(f)
+                logger.info("纠正数据加载成功")
+        except Exception as e:
+            logger.error(f"加载纠正数据失败: {e}")
+            self.corrections = {}
+
+    def _save_corrections(self):
+        """保存用户纠正数据"""
+        try:
+            import json
+            import os
+            with open(self.corrections_file, "w", encoding="utf-8") as f:
+                json.dump(self.corrections, f, ensure_ascii=False, indent=2)
+            logger.info("纠正数据保存成功")
+        except Exception as e:
+            logger.error(f"保存纠正数据失败: {e}")
+
+    def _add_uncertainty(self, response):
+        """在回复中添加不确定性表达"""
+        import random
+        
+        # 随机添加不确定性词汇
+        if random.random() < 0.3:
+            uncertainty_word = random.choice(self.uncertainty_words)
+            # 根据句子结构选择合适的位置添加
+            if response.startswith(('你', '我', '他', '她', '它', '这', '那')):
+                # 在句首添加
+                response = f"{uncertainty_word}，{response}"
+            else:
+                # 在句中添加
+                sentences = response.split('。')
+                if sentences:
+                    target_sentence = random.choice(sentences)
+                    if target_sentence:
+                        words = target_sentence.split(' ')
+                        if len(words) > 1:
+                            insert_pos = random.randint(0, len(words) - 1)
+                            words.insert(insert_pos, uncertainty_word)
+                            target_sentence = ' '.join(words)
+                        sentences[sentences.index(target_sentence)] = target_sentence
+                    response = '。'.join(sentences)
+        
+        return response
+
+    def _learn_from_correction(self, original_response, corrected_response):
+        """从用户纠正中学习"""
+        # 记录纠正信息
+        import uuid
+        import datetime
+        correction_id = str(uuid.uuid4())
+        self.corrections[correction_id] = {
+            "original": original_response,
+            "corrected": corrected_response,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        # 保存纠正数据
+        self._save_corrections()
+        logger.info("已记录用户纠正")
 
     def _update_learning_data(self, scene, feedback):
         """更新学习数据"""
@@ -2664,6 +3370,7 @@ class ScreenCompanion(Star):
                         logger.info(f"[任务 {task_id}] 等待期间收到取消信号")
                         raise
 
+                # 检查状态：每次判定前都进行状态检查
                 if not self.is_running or self.state != "active":
                     logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
                     break
@@ -2677,6 +3384,12 @@ class ScreenCompanion(Star):
                     # 检查是否还有其他任务在运行
                     if not self.auto_tasks:
                         self.is_running = False
+                        self.state = "inactive"
+                    break
+
+                # 再次检查状态
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
                     break
 
                 # 系统状态检测
@@ -2730,10 +3443,20 @@ class ScreenCompanion(Star):
                     if random_number <= probability:
                         trigger = True
 
+                # 检查是否被停止
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
+                    break
+
+                # 再次检查状态
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
+                    break
+
                 if trigger:
                     logger.info(f"[任务 {task_id}] 触发判定通过，开始执行屏幕分析")
                     try:
-                        if not self.is_running:
+                        if not self.is_running or self.state != "active":
                             logger.info(
                                 f"[任务 {task_id}] 任务停止标志被设置，取消屏幕分析"
                             )
@@ -2752,9 +3475,24 @@ class ScreenCompanion(Star):
                                 self.is_running = False
                             break
 
+                        # 检查是否被停止
+                        if not self.is_running or self.state != "active":
+                            logger.info(
+                                f"[任务 {task_id}] 任务停止标志被设置，取消屏幕分析"
+                            )
+                            break
+
                         image_bytes, active_window_title = await asyncio.wait_for(
                             self._capture_screen_bytes(), timeout=10.0
                         )
+
+                        # 检查是否被停止
+                        if not self.is_running or self.state != "active":
+                            logger.info(
+                                f"[任务 {task_id}] 任务停止标志被设置，取消屏幕分析"
+                            )
+                            break
+
                         components = await asyncio.wait_for(
                             self._analyze_screen(
                                 image_bytes,
@@ -2765,6 +3503,13 @@ class ScreenCompanion(Star):
                             ),
                             timeout=120.0,
                         )
+
+                        # 检查是否被停止
+                        if not self.is_running or self.state != "active":
+                            logger.info(
+                                f"[任务 {task_id}] 任务停止标志被设置，取消发送消息"
+                            )
+                            break
 
                         chain = MessageChain()
                         for comp in components:
