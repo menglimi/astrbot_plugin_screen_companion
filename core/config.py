@@ -60,7 +60,7 @@ class PluginConfig(BaseModel):
     admin_qq: str = ""
     proactive_target: str = ""
     save_local: bool = True
-    custom_tasks: str = "02:00 根据用户行为催促其尽快休息"
+    custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True
     learning_storage: str = ""

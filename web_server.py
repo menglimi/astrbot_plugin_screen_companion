@@ -184,9 +184,16 @@ class WebServer:
         self.app.router.add_get("/api/diaries", self.handle_list_diaries)
         self.app.router.add_get("/api/diary/{date}", self.handle_get_diary)
         self.app.router.add_get("/api/observations", self.handle_list_observations)
+        self.app.router.add_delete("/api/observations/{index}", self.handle_delete_observation)
+        self.app.router.add_delete("/api/observations/batch", self.handle_batch_delete_observations)
         self.app.router.add_get("/api/memories", self.handle_list_memories)
         self.app.router.add_get("/api/config", self.handle_get_config)
+        self.app.router.add_get("/api/settings", self.handle_get_settings)
+        self.app.router.add_post("/api/settings", self.handle_update_settings)
         self.app.router.add_get("/api/health", self.handle_health_check)
+        self.app.router.add_get("/api/runtime", self.handle_get_runtime_status)
+        self.app.router.add_post("/api/runtime/config", self.handle_update_runtime_config)
+        self.app.router.add_post("/api/runtime/stop", self.handle_stop_runtime_tasks)
         
         # 外部图片分析API
         self.app.router.add_post("/api/analyze", self.handle_analyze_image)
@@ -448,9 +455,66 @@ class WebServer:
     async def handle_list_observations(self, request):
         """获取观察记录"""
         try:
-            observations = self.plugin.observations
+            # 获取查询参数
+            page = int(request.query.get('page', 1))
+            limit = int(request.query.get('limit', 20))
+            sort = request.query.get('sort', 'desc')  # desc 或 asc
+            scene = request.query.get('scene', '')
+            
+            # 复制观察记录以便处理
+            observations = []
+            for index, obs in enumerate(self.plugin.observations.copy()):
+                scene = str(obs.get("scene", "") or "").strip()
+                if scene.lower() in {"unknown", "none", "null"} or scene == "未知":
+                    scene = ""
+
+                active_window = str(
+                    obs.get("active_window")
+                    or obs.get("window_title")
+                    or ""
+                ).strip()
+                if active_window.lower() in {"unknown", "none", "null"} or active_window in {"未知", "宿主机截图"}:
+                    active_window = ""
+
+                content = str(
+                    obs.get("content")
+                    or obs.get("description")
+                    or obs.get("recognition")
+                    or ""
+                ).strip()
+
+                observations.append(
+                    {
+                        "index": index,
+                        **obs,
+                        "scene": scene,
+                        "active_window": active_window,
+                        "content": content,
+                    }
+                )
+            
+            # 按场景过滤
+            if scene:
+                observations = [
+                    obs for obs in observations
+                    if obs.get('scene', '').lower() == scene.lower()
+                ]
+            
+            # 按时间排序
+            observations.sort(key=lambda x: x.get('timestamp', ''), reverse=(sort == 'desc'))
+            
+            # 分页
+            total = len(observations)
+            start = (page - 1) * limit
+            end = start + limit
+            paginated_observations = observations[start:end]
+            
             return self._ok({
-                'observations': observations
+                'observations': paginated_observations,
+                'total': total,
+                'page': page,
+                'limit': limit,
+                'pages': (total + limit - 1) // limit
             })
         except Exception as e:
             logger.error(f"Error listing observations: {e}")
@@ -460,7 +524,75 @@ class WebServer:
         """获取记忆数据"""
         try:
             memories = []
-            # 这里需要根据插件的记忆存储结构来实现
+            if hasattr(self.plugin, "_clean_long_term_memory_noise"):
+                self.plugin._clean_long_term_memory_noise()
+            long_term_memory = getattr(self.plugin, "long_term_memory", {}) or {}
+
+            applications = long_term_memory.get("applications", {})
+            for app_name, data in applications.items():
+                scenes = data.get("scenes", {}) or {}
+                top_scenes = sorted(scenes.items(), key=lambda item: item[1], reverse=True)[:3]
+                scene_summary = "、".join(f"{name}({count})" for name, count in top_scenes)
+                memories.append(
+                    {
+                        "category": "applications",
+                        "category_label": "常用应用",
+                        "title": app_name,
+                        "summary": f"累计使用 {data.get('usage_count', 0)} 次，总时长约 {data.get('total_duration', 0)} 秒。",
+                        "meta": f"最近使用: {data.get('last_used', '未知')} | 关联场景: {scene_summary or '暂无'}",
+                        "priority": data.get("priority", 0),
+                    }
+                )
+
+            scenes = long_term_memory.get("scenes", {})
+            for scene_name, data in scenes.items():
+                memories.append(
+                    {
+                        "category": "scenes",
+                        "category_label": "高频场景",
+                        "title": scene_name,
+                        "summary": f"该场景累计出现 {data.get('usage_count', 0)} 次。",
+                        "meta": f"最近出现: {data.get('last_used', '未知')}",
+                        "priority": data.get("priority", 0),
+                    }
+                )
+
+            user_preferences = long_term_memory.get("user_preferences", {})
+            for category, preferences in user_preferences.items():
+                for pref_name, data in preferences.items():
+                    memories.append(
+                        {
+                            "category": "preferences",
+                            "category_label": "用户偏好",
+                            "title": pref_name,
+                            "summary": f"偏好分类: {category}，累计提及 {data.get('count', 0)} 次。",
+                            "meta": f"最近提及: {data.get('last_mentioned', '未知')}",
+                            "priority": data.get("priority", 0),
+                        }
+                    )
+
+            associations = long_term_memory.get("memory_associations", {})
+            for assoc_name, data in associations.items():
+                if "_" in assoc_name:
+                    scene_name, app_name = assoc_name.split("_", 1)
+                    title = f"{scene_name} x {app_name}"
+                else:
+                    title = assoc_name
+                memories.append(
+                    {
+                        "category": "associations",
+                        "category_label": "记忆关联",
+                        "title": title,
+                        "summary": f"这个组合共出现 {data.get('count', 0)} 次。",
+                        "meta": f"最近出现: {data.get('last_occurred', '未知')}",
+                        "priority": data.get("count", 0),
+                    }
+                )
+
+            memories.sort(
+                key=lambda item: (item.get("priority", 0), item.get("title", "")),
+                reverse=True,
+            )
             return self._ok({
                 'memories': memories
             })
@@ -472,16 +604,424 @@ class WebServer:
         """获取配置信息"""
         try:
             return self._ok({
-                "version": "1.0.0",
-                "plugin_version": "2.3.1"
+                "version": "2.4.0",
+                "plugin_version": "2.4.0"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
             return self._err(str(e))
 
+    def _get_settings_schema_path(self) -> Path:
+        return Path(__file__).resolve().parent / "_conf_schema.json"
+
+    def _load_settings_schema(self) -> dict[str, Any]:
+        schema_path = self._get_settings_schema_path()
+        try:
+            import json
+
+            with schema_path.open("r", encoding="utf-8") as f:
+                schema = json.load(f)
+            if isinstance(schema, dict):
+                return schema
+        except Exception as e:
+            logger.error(f"读取配置 schema 失败: {e}")
+        return {}
+
+    def _build_settings_payload(self) -> dict[str, Any]:
+        schema = self._load_settings_schema()
+        values = {}
+
+        for key in schema.keys():
+            values[key] = getattr(self.plugin, key, None)
+
+        webui_config = getattr(getattr(self.plugin, "plugin_config", None), "webui", None)
+        if webui_config:
+            values.update(
+                {
+                    "webui.enabled": bool(getattr(webui_config, "enabled", False)),
+                    "webui.host": getattr(webui_config, "host", "0.0.0.0"),
+                    "webui.port": int(getattr(webui_config, "port", 8898) or 8898),
+                    "webui.auth_enabled": bool(getattr(webui_config, "auth_enabled", True)),
+                    "webui.password": getattr(webui_config, "password", ""),
+                    "webui.session_timeout": int(getattr(webui_config, "session_timeout", 3600) or 3600),
+                    "webui.allow_external_api": bool(getattr(webui_config, "allow_external_api", False)),
+                }
+            )
+
+        groups = [
+            {
+                "id": "persona",
+                "title": "人格与对话",
+                "description": "决定 bot 的性格、开场方式、互动风格和提示词语气。",
+                "fields": [
+                    "bot_name",
+                    "system_prompt",
+                    "user_preferences",
+                    "start_end_mode",
+                    "start_preset",
+                    "end_preset",
+                    "start_llm_prompt",
+                    "end_llm_prompt",
+                ],
+            },
+            {
+                "id": "runtime",
+                "title": "运行节奏",
+                "description": "控制自动观察的频率、时间范围、预设与触发强度。",
+                "fields": [
+                    "enabled",
+                    "interaction_mode",
+                    "check_interval",
+                    "trigger_probability",
+                    "interaction_frequency",
+                    "active_time_range",
+                    "rest_time_range",
+                    "custom_presets",
+                    "current_preset_index",
+                    "watch_mode",
+                    "capture_mode",
+                ],
+            },
+            {
+                "id": "vision",
+                "title": "识屏与视觉",
+                "description": "控制截图理解质量、外部视觉接口和识别提示词。",
+                "fields": [
+                    "bot_vision_quality",
+                    "image_quality",
+                    "image_prompt",
+                    "use_external_vision",
+                    "vision_api_url",
+                    "vision_api_key",
+                    "vision_api_model",
+                ],
+            },
+            {
+                "id": "diary",
+                "title": "日记与记忆",
+                "description": "控制日记生成、回顾、学习和长期记忆相关参数。",
+                "fields": [
+                    "enable_diary",
+                    "diary_time",
+                    "diary_reference_days",
+                    "diary_auto_recall",
+                    "diary_recall_time",
+                    "diary_send_as_image",
+                    "diary_generation_prompt",
+                    "enable_learning",
+                    "max_observations",
+                ],
+            },
+            {
+                "id": "sensing",
+                "title": "环境感知",
+                "description": "麦克风、天气和主动消息目标等附加感知能力。",
+                "fields": [
+                    "enable_mic_monitor",
+                    "mic_threshold",
+                    "mic_check_interval",
+                    "weather_api_key",
+                    "weather_city",
+                    "admin_qq",
+                    "proactive_target",
+                    "custom_tasks",
+                    "debug",
+                ],
+            },
+            {
+                "id": "webui",
+                "title": "WebUI",
+                "description": "控制 WebUI 自身的访问、端口和外部 API 能力。",
+                "fields": [
+                    "webui.enabled",
+                    "webui.host",
+                    "webui.port",
+                    "webui.auth_enabled",
+                    "webui.password",
+                    "webui.session_timeout",
+                    "webui.allow_external_api",
+                ],
+            },
+        ]
+
+        webui_schema = {
+            "webui.enabled": {
+                "description": "启用 WebUI",
+                "type": "bool",
+                "hint": "关闭后将不会启动浏览器管理界面。",
+                "default": False,
+            },
+            "webui.host": {
+                "description": "WebUI 监听地址",
+                "type": "string",
+                "hint": "通常保留 0.0.0.0 即可，本地访问会自动映射到 127.0.0.1。",
+                "default": "0.0.0.0",
+            },
+            "webui.port": {
+                "description": "WebUI 端口",
+                "type": "int",
+                "hint": "默认 8898，修改后会自动重启 WebUI。",
+                "default": 8898,
+                "min": 1,
+                "max": 65535,
+            },
+            "webui.auth_enabled": {
+                "description": "启用访问密码",
+                "type": "bool",
+                "hint": "建议保留开启，避免本地管理页被直接访问。",
+                "default": True,
+            },
+            "webui.password": {
+                "description": "WebUI 密码",
+                "type": "password",
+                "hint": "留空时会在需要保护的情况下自动生成密码。",
+                "default": "",
+            },
+            "webui.session_timeout": {
+                "description": "会话过期时间",
+                "type": "int",
+                "hint": "单位为秒。",
+                "default": 3600,
+                "min": 300,
+                "max": 604800,
+            },
+            "webui.allow_external_api": {
+                "description": "允许外部 API 调用",
+                "type": "bool",
+                "hint": "开启后可通过 WebUI 密码调用图片分析接口。",
+                "default": False,
+            },
+        }
+
+        schema.update(webui_schema)
+        return {"schema": schema, "values": values, "groups": groups}
+
+    @staticmethod
+    def _coerce_setting_value(field_key: str, field_meta: dict[str, Any], raw_value: Any) -> Any:
+        field_type = str(field_meta.get("type", "string") or "string")
+
+        if field_type == "bool":
+            if isinstance(raw_value, bool):
+                return raw_value
+            if isinstance(raw_value, str):
+                return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(raw_value)
+
+        if field_type in {"int", "integer"}:
+            value = int(raw_value)
+            min_value = field_meta.get("min")
+            max_value = field_meta.get("max")
+            if min_value is not None and value < int(min_value):
+                raise ValueError(f"{field_key} 不能小于 {min_value}")
+            if max_value is not None and value > int(max_value):
+                raise ValueError(f"{field_key} 不能大于 {max_value}")
+            return value
+
+        value = "" if raw_value is None else str(raw_value)
+        enum_values = field_meta.get("enum")
+        if enum_values and value not in enum_values:
+            raise ValueError(f"{field_key} 必须是以下值之一: {', '.join(map(str, enum_values))}")
+        return value
+
+    async def handle_get_settings(self, request):
+        """获取配置 schema 与当前值。"""
+        try:
+            return self._ok({"settings": self._build_settings_payload()})
+        except Exception as e:
+            logger.error(f"Error getting settings: {e}")
+            return self._err(str(e))
+
+    async def handle_update_settings(self, request):
+        """批量更新配置。"""
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._err("Invalid JSON", 400)
+
+        provided_updates = (payload or {}).get("updates")
+        if not isinstance(provided_updates, dict) or not provided_updates:
+            return self._err("No settings provided", 400)
+
+        settings_payload = self._build_settings_payload()
+        schema = settings_payload.get("schema", {})
+        normalized_updates: dict[str, Any] = {}
+        webui_updates: dict[str, Any] = {}
+
+        try:
+            for key, raw_value in provided_updates.items():
+                if key not in schema:
+                    continue
+
+                coerced = self._coerce_setting_value(key, schema[key], raw_value)
+                if key.startswith("webui."):
+                    webui_updates[key.split(".", 1)[1]] = coerced
+                else:
+                    normalized_updates[key] = coerced
+        except ValueError as e:
+            return self._err(str(e), 400)
+
+        if webui_updates:
+            normalized_updates["webui"] = webui_updates
+
+        if not normalized_updates:
+            return self._err("No valid settings provided", 400)
+
+        self.plugin._update_config_from_dict(normalized_updates)
+        return self._ok({"settings": self._build_settings_payload()})
+
     async def handle_health_check(self, request):
         """健康检查"""
         return self._ok({"status": "ok", "service": "screen-companion-webui"})
+
+    def _build_runtime_status(self) -> dict[str, Any]:
+        current_interval, current_probability = self.plugin._get_current_preset_params()
+        presets = []
+        for index, preset in enumerate(getattr(self.plugin, "parsed_custom_presets", []) or []):
+            presets.append(
+                {
+                    "index": index,
+                    "name": preset.get("name", f"预设 {index}"),
+                    "check_interval": preset.get("check_interval", 0),
+                    "trigger_probability": preset.get("trigger_probability", 0),
+                    "active": index == getattr(self.plugin, "current_preset_index", -1),
+                }
+            )
+
+        return {
+            "enabled": bool(getattr(self.plugin, "enabled", False)),
+            "is_running": bool(getattr(self.plugin, "is_running", False)),
+            "state": getattr(self.plugin, "state", "unknown"),
+            "active_task_count": len(getattr(self.plugin, "auto_tasks", {}) or {}),
+            "temporary_task_count": len(getattr(self.plugin, "temporary_tasks", {}) or {}),
+            "current_preset_index": getattr(self.plugin, "current_preset_index", -1),
+            "current_check_interval": current_interval,
+            "current_trigger_probability": current_probability,
+            "check_interval": getattr(self.plugin, "check_interval", 0),
+            "trigger_probability": getattr(self.plugin, "trigger_probability", 0),
+            "active_time_range": getattr(self.plugin, "active_time_range", ""),
+            "rest_time_range": getattr(self.plugin, "rest_time_range", ""),
+            "interaction_mode": getattr(self.plugin, "interaction_mode", ""),
+            "interaction_frequency": getattr(self.plugin, "interaction_frequency", 0),
+            "enable_diary": bool(getattr(self.plugin, "enable_diary", False)),
+            "enable_learning": bool(getattr(self.plugin, "enable_learning", False)),
+            "enable_mic_monitor": bool(getattr(self.plugin, "enable_mic_monitor", False)),
+            "debug": bool(getattr(self.plugin, "debug", False)),
+            "diary_time": getattr(self.plugin, "diary_time", ""),
+            "observation_count": len(getattr(self.plugin, "observations", []) or []),
+            "presets": presets,
+        }
+
+    async def handle_get_runtime_status(self, request):
+        """获取当前运行状态"""
+        try:
+            return self._ok({"runtime": self._build_runtime_status()})
+        except Exception as e:
+            logger.error(f"Error getting runtime status: {e}")
+            return self._err(str(e))
+
+    async def handle_update_runtime_config(self, request):
+        """更新可安全热切换的运行配置"""
+        try:
+            payload = await request.json()
+        except Exception:
+            return self._err("Invalid JSON", 400)
+
+        allowed_keys = {
+            "enabled",
+            "check_interval",
+            "trigger_probability",
+            "active_time_range",
+            "rest_time_range",
+            "interaction_mode",
+            "interaction_frequency",
+            "enable_diary",
+            "enable_learning",
+            "enable_mic_monitor",
+            "debug",
+            "current_preset_index",
+        }
+
+        updates = {}
+        for key, value in (payload or {}).items():
+            if key in allowed_keys:
+                updates[key] = value
+
+        if not updates:
+            return self._err("No valid runtime fields provided", 400)
+
+        if "current_preset_index" in updates:
+            try:
+                preset_index = int(updates["current_preset_index"])
+            except Exception:
+                return self._err("current_preset_index must be an integer", 400)
+
+            preset_count = len(getattr(self.plugin, "parsed_custom_presets", []) or [])
+            if preset_index < -1 or preset_index >= preset_count:
+                return self._err("Preset index out of range", 400)
+            updates["current_preset_index"] = preset_index
+
+        self.plugin._update_config_from_dict(updates)
+        return self._ok({"runtime": self._build_runtime_status()})
+
+    async def handle_stop_runtime_tasks(self, request):
+        """停止当前自动观察任务"""
+        try:
+            auto_tasks = list((getattr(self.plugin, "auto_tasks", {}) or {}).items())
+            self.plugin.is_running = False
+            self.plugin.state = "inactive"
+
+            for _, task in auto_tasks:
+                task.cancel()
+
+            for task_id, task in auto_tasks:
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"等待任务 {task_id} 停止超时")
+                except asyncio.CancelledError:
+                    logger.info(f"任务 {task_id} 已取消")
+                except Exception as e:
+                    logger.error(f"等待任务 {task_id} 停止时出错: {e}")
+
+            if hasattr(self.plugin, "auto_tasks"):
+                self.plugin.auto_tasks.clear()
+
+            return self._ok({"runtime": self._build_runtime_status()})
+        except Exception as e:
+            logger.error(f"Error stopping runtime tasks: {e}")
+            return self._err(str(e))
+
+    async def handle_delete_observation(self, request):
+        """删除单个观察记录"""
+        try:
+            index = int(request.match_info["index"])
+            if 0 <= index < len(self.plugin.observations):
+                deleted_observation = self.plugin.observations.pop(index)
+                self.plugin._save_observations()
+                return self._ok({"deleted": deleted_observation})
+            else:
+                return self._err("索引超出范围", 400)
+        except Exception as e:
+            logger.error(f"删除观察记录失败: {e}")
+            return self._err(str(e))
+
+    async def handle_batch_delete_observations(self, request):
+        """批量删除观察记录"""
+        try:
+            payload = await request.json()
+            indices = payload.get("indices", [])
+            # 确保索引是整数且排序（从大到小删除，避免索引移位）
+            sorted_indices = sorted([int(i) for i in indices], reverse=True)
+            deleted_count = 0
+            for index in sorted_indices:
+                if 0 <= index < len(self.plugin.observations):
+                    self.plugin.observations.pop(index)
+                    deleted_count += 1
+            self.plugin._save_observations()
+            return self._ok({"deleted_count": deleted_count})
+        except Exception as e:
+            logger.error(f"批量删除观察记录失败: {e}")
+            return self._err(str(e))
 
     async def handle_analyze_image(self, request):
         """通过文件上传分析图片"""
@@ -631,9 +1171,15 @@ class WebServer:
     async def handle_auth_info(self, request):
         """获取认证信息"""
         expected = self._get_expected_secret()
+        authenticated = False
+        if expected:
+            sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
+            exp = self._sessions.get(sid)
+            authenticated = bool(exp and exp >= time.time())
         return self._ok(
             {
                 "requires_auth": bool(expected),
+                "authenticated": authenticated,
                 "session_timeout": self._get_session_timeout(),
             }
         )

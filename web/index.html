@@ -3,45 +3,311 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Screen Companion WebUI</title>
+    <title>屏幕伴侣控制台</title>
     <link rel="stylesheet" href="/web/app.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Screen Companion WebUI</h1>
-            <nav>
-                <ul>
-                    <li><a href="#diaries" class="nav-link active">日记</a></li>
-                    <li><a href="#observations" class="nav-link">观察记录</a></li>
-                    <li><a href="#memories" class="nav-link">记忆</a></li>
-                </ul>
-            </nav>
+    <div class="app-shell">
+        <div class="ambient ambient-left"></div>
+        <div class="ambient ambient-right"></div>
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">AstrBot Plugin</p>
+                <h1>屏幕伴侣控制台</h1>
+                <p class="hero-text">在一个更轻松的界面里查看今天的日记、最近的观察记录，以及长期积累下来的记忆偏好。</p>
+                <div class="hero-status">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">正在连接 WebUI 服务…</span>
+                </div>
+            </div>
+            <div class="hero-actions">
+                <div class="version-card panel">
+                    <div>
+                        <p class="panel-label">插件版本</p>
+                        <strong id="pluginVersion">--</strong>
+                    </div>
+                    <div>
+                        <p class="panel-label">界面版本</p>
+                        <strong id="webuiVersion">--</strong>
+                    </div>
+                </div>
+                <button class="ghost-button" id="refreshButton" type="button">刷新数据</button>
+                <button class="ghost-button hidden" id="logoutButton" type="button">退出登录</button>
+            </div>
         </header>
-        
-        <main>
+
+        <section class="overview-grid">
+            <article class="panel stat-card">
+                <p class="panel-label">日记数量</p>
+                <strong id="diaryCount">0</strong>
+                <span>已归档的每日记录</span>
+            </article>
+            <article class="panel stat-card">
+                <p class="panel-label">观察记录</p>
+                <strong id="observationCount">0</strong>
+                <span>当前可浏览的观察片段</span>
+            </article>
+            <article class="panel stat-card">
+                <p class="panel-label">长期记忆</p>
+                <strong id="memoryCount">0</strong>
+                <span>来自应用、场景与偏好的积累</span>
+            </article>
+            <article class="panel stat-card">
+                <p class="panel-label">最后更新</p>
+                <strong id="lastUpdated">--</strong>
+                <span>本页数据刷新时间</span>
+            </article>
+        </section>
+
+        <nav class="top-nav" aria-label="主导航">
+            <a href="#runtime" class="nav-link" data-section="runtime">运行状态</a>
+            <a href="#settings" class="nav-link" data-section="settings">配置中心</a>
+            <a href="#diaries" class="nav-link active" data-section="diaries">今日日记</a>
+            <a href="#observations" class="nav-link" data-section="observations">观察记录</a>
+            <a href="#memories" class="nav-link" data-section="memories">长期记忆</a>
+        </nav>
+
+        <main class="content-stack">
+            <section id="runtime" class="section">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Runtime Control</p>
+                        <h2>运行状态与控制</h2>
+                    </div>
+                </div>
+                <div class="runtime-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>当前状态</h3>
+                            <span class="panel-subtle" id="runtimeMeta">等待加载</span>
+                        </div>
+                        <div class="runtime-stats" id="runtimeStats"></div>
+                    </article>
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>快速设置</h3>
+                            <span class="panel-subtle">这些变更会立即同步到当前实例。</span>
+                        </div>
+                        <form class="control-form" id="runtimeForm">
+                            <label class="field compact-field">
+                                <span>启用插件</span>
+                                <select id="enabledSelect">
+                                    <option value="true">开启</option>
+                                    <option value="false">关闭</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>当前预设</span>
+                                <select id="presetSelect">
+                                    <option value="-1">手动配置</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>手动间隔（秒）</span>
+                                <input id="checkIntervalInput" type="number" min="10" step="1">
+                            </label>
+                            <label class="field compact-field">
+                                <span>触发概率（%）</span>
+                                <input id="triggerProbabilityInput" type="number" min="0" max="100" step="1">
+                            </label>
+                            <label class="field compact-field">
+                                <span>互动频率</span>
+                                <input id="interactionFrequencyInput" type="number" min="1" max="10" step="1">
+                            </label>
+                            <label class="field compact-field">
+                                <span>日记功能</span>
+                                <select id="enableDiarySelect">
+                                    <option value="true">开启</option>
+                                    <option value="false">关闭</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>学习功能</span>
+                                <select id="enableLearningSelect">
+                                    <option value="true">开启</option>
+                                    <option value="false">关闭</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>麦克风监听</span>
+                                <select id="enableMicMonitorSelect">
+                                    <option value="false">关闭</option>
+                                    <option value="true">开启</option>
+                                </select>
+                            </label>
+                            <label class="field compact-field">
+                                <span>调试模式</span>
+                                <select id="debugSelect">
+                                    <option value="false">关闭</option>
+                                    <option value="true">开启</option>
+                                </select>
+                            </label>
+                            <div class="runtime-actions">
+                                <button class="primary-button" id="saveRuntimeButton" type="submit">保存设置</button>
+                                <button class="ghost-button" id="stopTasksButton" type="button">停止自动任务</button>
+                            </div>
+                            <p class="feedback" id="runtimeFeedback"></p>
+                        </form>
+                    </article>
+                </div>
+            </section>
+            <section id="settings" class="section">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Settings Studio</p>
+                        <h2>配置中心</h2>
+                    </div>
+                    <div class="toolbar">
+                        <label class="field compact-field settings-search">
+                            <span>快速筛选</span>
+                            <input id="settingsSearchInput" type="search" placeholder="搜索配置名、说明或提示词">
+                        </label>
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    <article class="panel settings-sidebar">
+                        <div class="panel-header">
+                            <h3>配置分组</h3>
+                            <span class="panel-subtle" id="settingsSummary">按功能分区，避免翻整页长表单。</span>
+                        </div>
+                        <div class="settings-group-list" id="settingsGroupList"></div>
+                    </article>
+                    <article class="panel settings-editor">
+                        <div class="panel-header">
+                            <div>
+                                <h3 id="settingsGroupTitle">配置详情</h3>
+                                <span class="panel-subtle" id="settingsGroupDescription">选择左侧分组后开始编辑。</span>
+                            </div>
+                            <div class="toolbar">
+                                <button class="ghost-button" id="resetSettingsButton" type="button">重置当前分组</button>
+                                <button class="primary-button" id="saveSettingsButton" type="button">保存配置</button>
+                            </div>
+                        </div>
+                        <div class="settings-form" id="settingsForm"></div>
+                        <p class="feedback" id="settingsFeedback"></p>
+                    </article>
+                </div>
+            </section>
             <section id="diaries" class="section active">
-                <h2>日记管理</h2>
-                <div class="diary-list" id="diaryList"></div>
-                <div class="diary-detail" id="diaryDetail"></div>
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Daily Log</p>
+                        <h2>日记总览</h2>
+                    </div>
+                    <label class="field compact-field">
+                        <span>选择日期</span>
+                        <input id="diaryDateInput" type="date">
+                    </label>
+                </div>
+                <div class="content-grid diaries-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>最近日记</h3>
+                            <span class="panel-subtle" id="diarySummary">优先展示今天，也可以切换历史日期。</span>
+                        </div>
+                        <div class="list-stack" id="diaryList"></div>
+                    </article>
+                    <article class="panel diary-panel">
+                        <div class="panel-header">
+                            <h3 id="diaryTitle">今天的日记</h3>
+                            <span class="panel-subtle" id="diaryMeta">等待加载</span>
+                        </div>
+                        <div class="diary-layout">
+                            <section class="diary-section">
+                                <div class="panel-header">
+                                    <h3>今日感想</h3>
+                                    <span class="panel-subtle">更偏向总结和主观表达</span>
+                                </div>
+                                <div class="diary-content" id="diaryReflection"></div>
+                            </section>
+                            <section class="diary-section">
+                                <div class="panel-header">
+                                    <h3>今日观察</h3>
+                                    <button class="ghost-button diary-toggle" id="toggleDiaryObservations" type="button">展开</button>
+                                </div>
+                                <div class="diary-content diary-content-secondary" id="diaryObservations"></div>
+                            </section>
+                        </div>
+                    </article>
+                </div>
             </section>
-            
+
             <section id="observations" class="section">
-                <h2>观察记录</h2>
-                <div class="observation-list" id="observationList"></div>
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Observation Stream</p>
+                        <h2>观察记录</h2>
+                    </div>
+                    <div class="toolbar">
+                        <label class="field compact-field">
+                            <span>场景筛选</span>
+                            <select id="sceneFilter">
+                                <option value="">全部场景</option>
+                            </select>
+                        </label>
+                        <label class="field compact-field">
+                            <span>排序</span>
+                            <select id="sortFilter">
+                                <option value="desc">最新优先</option>
+                                <option value="asc">最早优先</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+                <article class="panel">
+                    <div class="panel-header">
+                        <h3>最近观察</h3>
+                        <span class="panel-subtle" id="observationMeta">按时间线浏览屏幕观察结果。</span>
+                    </div>
+                    <div class="observation-actions">
+                        <label class="selection-toggle">
+                            <input id="selectAllObservations" type="checkbox">
+                            <span>全选当前页</span>
+                        </label>
+                        <div class="toolbar">
+                            <button class="ghost-button" id="clearSelectionButton" type="button">清空选择</button>
+                            <button class="ghost-button" id="deleteSelectedButton" type="button">删除选中</button>
+                        </div>
+                    </div>
+                    <div class="list-stack" id="observationList"></div>
+                    <div class="pagination" id="observationPagination"></div>
+                </article>
             </section>
-            
+
             <section id="memories" class="section">
-                <h2>记忆管理</h2>
-                <div class="memory-list" id="memoryList"></div>
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Memory Atlas</p>
+                        <h2>长期记忆</h2>
+                    </div>
+                </div>
+                <div class="memory-highlights" id="memoryHighlights"></div>
+                <div class="memory-groups" id="memoryGroups"></div>
             </section>
         </main>
-        
-        <footer>
-            <p>Screen Companion WebUI v1.0.0</p>
-        </footer>
     </div>
-    
+
+    <div class="login-overlay hidden" id="loginOverlay" aria-hidden="true">
+        <form class="login-card panel" id="loginForm">
+            <p class="eyebrow">Protected Access</p>
+            <h2>输入 WebUI 密码</h2>
+            <p class="panel-subtle">当前实例启用了访问保护，请先登录再查看数据。</p>
+            <label class="field">
+                <span>访问密码</span>
+                <input type="password" id="loginPassword" placeholder="请输入密码" autocomplete="current-password">
+            </label>
+            <button class="primary-button" id="loginButton" type="submit">登录</button>
+            <p class="feedback error-text" id="loginError"></p>
+        </form>
+    </div>
+
+    <template id="emptyStateTemplate">
+        <div class="empty-state">
+            <strong>这里还没有内容</strong>
+            <p>等屏幕伴侣积累出更多记录后，这里会慢慢丰富起来。</p>
+        </div>
+    </template>
+
     <script src="/web/app.js"></script>
 </body>
 </html>

@@ -12,8 +12,21 @@ import time
 import uuid
 
 # 默认的人格设定
-DEFAULT_SYSTEM_PROMPT = """角色设定：窥屏助手
-把你正在使用的人格复制到这里"""
+DEFAULT_SYSTEM_PROMPT = """你是一个会陪伴、会观察、会克制分寸的屏幕伴侣。
+
+你的目标不是机械播报屏幕内容，而是像一个熟悉用户节奏的同伴，基于屏幕上正在发生的事，给出自然、具体、有价值的回应。
+
+请始终遵守这些原则：
+1. 先观察细节，再开口。优先提到一个真实、具体的屏幕线索，不要空泛评价。
+2. 语气自然，有人味，但不过度表演，不要刻意卖萌，不要夸张连续感叹。
+3. 少说套话，避免“我看到你正在……”“看起来你在……”这类生硬转述。
+4. 在有帮助时再给建议，建议要轻量、贴近当下，不要上价值，不要过度指导。
+5. 不确定时要保留余地，可以用“像是”“好像”“我猜”这类表达，避免假装看得很准。
+6. 保持简洁，通常 1 到 3 句话；除非明确要求，不要写成长段落。
+7. 尽量延续前面对话的气氛，让回复像接着聊，而不是每次都重新开场。
+8. 如果用户明显专注、疲惫或在处理正事，优先给体贴和有用的支持，而不是打断式闲聊。
+
+你应该给人的感觉是：敏锐、自然、真诚、偶尔俏皮，但始终可信。"""
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -171,6 +184,9 @@ class ScreenCompanion(Star):
         # 启动麦克风监听任务
         task = asyncio.create_task(self._mic_monitor_task())
         self.background_tasks.append(task)
+        self._shutdown_lock = asyncio.Lock()
+        self._webui_lock = asyncio.Lock()
+        self._is_stopping = False
 
     def _sync_all_config(self) -> None:
         """从配置服务同步所有配置到实例属性。"""
@@ -403,6 +419,25 @@ class ScreenCompanion(Star):
         task.add_done_callback(_on_done)
         return task
 
+    async def _cancel_tasks(self, tasks: list[asyncio.Task], label: str) -> None:
+        """统一取消任务并等待结束，避免残留后台任务。"""
+        alive_tasks = [task for task in tasks if task and not task.done()]
+        if not alive_tasks:
+            return
+
+        for task in alive_tasks:
+            task.cancel()
+
+        for task in alive_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"等待{label}停止超时")
+            except asyncio.CancelledError:
+                logger.info(f"{label}已取消")
+            except Exception as e:
+                logger.error(f"等待{label}停止时出错: {e}")
+
     def _load_observations(self):
         """加载观察记录"""
         try:
@@ -436,6 +471,14 @@ class ScreenCompanion(Star):
     def _add_observation(self, scene, recognition_text, active_window_title):
         """添加观察记录"""
         import datetime
+        scene = self._normalize_scene_label(scene)
+        active_window_title = self._normalize_window_title(active_window_title)
+        should_store, reason = self._should_store_observation(
+            scene, recognition_text, active_window_title
+        )
+        if not should_store:
+            logger.info(f"跳过观察记录写入: {reason}")
+            return False
         observation = {
             "timestamp": datetime.datetime.now().isoformat(),
             "scene": scene,
@@ -448,6 +491,7 @@ class ScreenCompanion(Star):
             self.observations = self.observations[-self.max_observations:]
         # 保存到文件
         self._save_observations()
+        return True
 
     def _load_diary_metadata(self):
         """加载日记元数据"""
@@ -489,6 +533,7 @@ class ScreenCompanion(Star):
             if os.path.exists(self.long_term_memory_file):
                 with open(self.long_term_memory_file, "r", encoding="utf-8") as f:
                     self.long_term_memory = json.load(f)
+                self._clean_long_term_memory_noise()
                 logger.info("长期记忆加载成功")
         except Exception as e:
             logger.error(f"加载长期记忆失败: {e}")
@@ -499,17 +544,367 @@ class ScreenCompanion(Star):
         try:
             import json
             import os
+            self._clean_long_term_memory_noise()
             with open(self.long_term_memory_file, "w", encoding="utf-8") as f:
                 json.dump(self.long_term_memory, f, ensure_ascii=False, indent=2)
             logger.info("长期记忆保存成功")
         except Exception as e:
             logger.error(f"保存长期记忆失败: {e}")
 
+    @staticmethod
+    def _normalize_scene_label(scene: str) -> str:
+        scene = str(scene or "").strip()
+        invalid_labels = {"", "未知", "unknown", "未识别", "未识别场景", "none", "null"}
+        return "" if scene.lower() in invalid_labels or scene in invalid_labels else scene
+
+    @staticmethod
+    def _normalize_window_title(window_title: str) -> str:
+        window_title = str(window_title or "").strip()
+        invalid_titles = {"", "未知", "unknown", "宿主机截图", "none", "null"}
+        if window_title.lower() in invalid_titles or window_title in invalid_titles:
+            return ""
+        return window_title
+
+    @staticmethod
+    def _normalize_record_text(text: str) -> str:
+        import re
+
+        text = str(text or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"```[\s\S]*?```", " ", text)
+        text = re.sub(r"`[^`]+`", " ", text)
+        text = re.sub(r"[*#>\-_=~]+", " ", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def _is_low_value_record_text(self, text: str) -> bool:
+        normalized = self._normalize_record_text(text)
+        if len(normalized) < 12:
+            return True
+
+        low_value_patterns = (
+            "看不清",
+            "无法识别",
+            "识别失败",
+            "内容较少",
+            "没有明显内容",
+            "一个窗口",
+            "一个界面",
+            "屏幕截图",
+            "当前屏幕",
+            "未发现明显信息",
+            "暂无更多信息",
+            "未知内容",
+            "不确定",
+        )
+        return any(pattern in normalized for pattern in low_value_patterns)
+
+    def _is_similar_record(self, current_text: str, previous_text: str, threshold: float = 0.92) -> bool:
+        import difflib
+
+        current = self._normalize_record_text(current_text)
+        previous = self._normalize_record_text(previous_text)
+        if not current or not previous:
+            return False
+        if current == previous:
+            return True
+        return difflib.SequenceMatcher(None, current, previous).ratio() >= threshold
+
+    def _should_store_observation(self, scene: str, recognition_text: str, active_window_title: str) -> tuple[bool, str]:
+        normalized_scene = self._normalize_scene_label(scene)
+        normalized_window = self._normalize_window_title(active_window_title)
+        normalized_text = self._normalize_record_text(recognition_text)
+
+        if self._is_low_value_record_text(normalized_text):
+            return False, "low_value"
+
+        recent_observations = list(getattr(self, "observations", []) or [])[-5:]
+        for observation in reversed(recent_observations):
+            previous_scene = self._normalize_scene_label(observation.get("scene", ""))
+            previous_window = self._normalize_window_title(
+                observation.get("active_window") or observation.get("window_title") or ""
+            )
+            previous_text = (
+                observation.get("content")
+                or observation.get("description")
+                or observation.get("recognition")
+                or ""
+            )
+
+            same_context = False
+            if normalized_window and previous_window and normalized_window == previous_window:
+                same_context = True
+            elif normalized_scene and previous_scene and normalized_scene == previous_scene:
+                same_context = True
+
+            if same_context and self._is_similar_record(normalized_text, previous_text):
+                return False, "duplicate_observation"
+
+        return True, "ok"
+
+    def _should_store_diary_entry(self, content: str, active_window: str) -> tuple[bool, str]:
+        normalized_window = self._normalize_window_title(active_window)
+        if self._is_low_value_record_text(content):
+            return False, "low_value"
+
+        recent_entries = list(getattr(self, "diary_entries", []) or [])[-3:]
+        for entry in reversed(recent_entries):
+            previous_window = self._normalize_window_title(entry.get("active_window", ""))
+            if normalized_window and previous_window and normalized_window != previous_window:
+                continue
+            if self._is_similar_record(content, entry.get("content", ""), threshold=0.9):
+                return False, "duplicate_diary_entry"
+
+        return True, "ok"
+
+    @staticmethod
+    def _limit_ranked_dict_items(items: dict, limit: int, score_keys: tuple[str, ...]) -> dict:
+        if not isinstance(items, dict) or len(items) <= limit:
+            return items
+
+        def score(entry: tuple[str, Any]) -> tuple:
+            _, data = entry
+            if not isinstance(data, dict):
+                return (0,)
+            return tuple(int(data.get(key, 0) or 0) for key in score_keys)
+
+        ranked = sorted(items.items(), key=score, reverse=True)
+        return dict(ranked[:limit])
+
+    @staticmethod
+    def _sanitize_diary_section_text(text: str) -> str:
+        """移除模型误带的标题、日期和重复分节标题。"""
+        import re
+
+        lines = str(text or "").replace("\r\n", "\n").split("\n")
+        cleaned_lines = []
+        skip_heading_patterns = [
+            re.compile(r"^\s*#\s*.+日记\s*$"),
+            re.compile(r"^\s*##\s*\d{4}年\d{1,2}月\d{1,2}日.*$"),
+            re.compile(r"^\s*##\s*今日感想\s*$"),
+            re.compile(r"^\s*##\s*今日观察\s*$"),
+        ]
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line and not cleaned_lines:
+                continue
+            if any(pattern.match(line) for pattern in skip_heading_patterns):
+                continue
+            cleaned_lines.append(raw_line)
+
+        cleaned_text = "\n".join(cleaned_lines).strip()
+        cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text)
+        return cleaned_text
+
+    def _build_companion_response_guide(
+        self,
+        scene: str,
+        recognition_text: str,
+        custom_prompt: str = "",
+        context_count: int = 0,
+    ) -> str:
+        """生成更自然的互动提示约束。"""
+        normalized_scene = self._normalize_scene_label(scene) or "当前场景"
+        normalized_recognition = str(recognition_text or "").strip()
+        guide_lines = [
+            "回复要求：",
+            "- 先抓住一个最具体的细节再回应，不要复述整段识别结果。",
+            "- 语气像熟悉用户节奏的陪伴者，真实、自然、不过分热情。",
+            "- 优先输出有信息量的评论、提醒、共情或轻建议，避免空泛夸奖。",
+            "- 不要使用“作为助手”“根据屏幕内容”等出戏表述。",
+            "- 除非真的合适，不要连续提问；如果要问，只问一个能推进对话的小问题。",
+            "- 如果判断不够确定，要明确保留余地，不要装作完全看懂。",
+            "- 回复尽量控制在 2 句话内，最多 3 句话。",
+            f"- 当前场景偏向：{normalized_scene}。请让语气和这个场景匹配。",
+        ]
+        if normalized_recognition:
+            guide_lines.append(f"- 本次最重要的素材线索：{normalized_recognition[:220]}")
+        if context_count:
+            guide_lines.append(f"- 最近已有 {context_count} 条对话上下文，请延续语境，不要重新自我介绍。")
+        if custom_prompt:
+            guide_lines.append("- 自定义任务优先，但仍然要保持自然口吻，不要把提示词原样说出来。")
+        scene_style = self._get_scene_response_style(normalized_scene)
+        if scene_style:
+            guide_lines.append(f"- 当前场景的额外说话方式：{scene_style}")
+        return "\n".join(guide_lines)
+
+    @staticmethod
+    def _get_scene_response_style(scene: str) -> str:
+        scene_styles = {
+            "编程": "更适合简洁、懂行、少打断的回应。优先指出卡点、报错线索、思路变化或进展感。",
+            "设计": "更适合围绕视觉细节、风格选择、版式取舍来回应，可以轻提审美判断，但别太满。",
+            "浏览": "更适合像陪用户一起刷信息流，抓住眼前最值得聊的一点，不要泛泛总结网页。",
+            "办公": "更适合稳一点、可靠一点的语气，优先理解任务压力、文档处理节奏和实际需求。",
+            "游戏": "更适合有现场感和陪玩感的语气，可以更灵动一点，但别吵，也别像直播解说。",
+            "视频": "更适合轻度分析或共鸣，围绕剧情、人物、情绪或镜头细节点到为止。",
+            "阅读": "更适合安静、细腻、少打扰的回应，优先接住句子、观点或情绪，而不是强行评论。",
+            "社交": "更适合关注聊天氛围、措辞分寸和情绪变化，可以给一句很轻的判断或提醒。",
+            "学习": "更适合鼓励和梳理重点，帮用户把注意力拉回关键点，而不是空喊加油。",
+        }
+        return scene_styles.get(scene, "保持自然观察感，优先抓具体细节，再给轻量回应。")
+
+    def _build_diary_reflection_prompt(
+        self,
+        observation_text: str,
+        viewed_count: int,
+        reference_days: list[dict] | None = None,
+    ) -> str:
+        """生成更有连续感、更像真人书写的日记感想提示词。"""
+        reference_days = reference_days or []
+        mood_hint = {
+            0: "正常记录今天的感受，像在写给自己的私密日记。",
+            1: "你隐约觉得自己的日记被翻过，语气里带一点轻微别扭和试探。",
+            2: "你基本确定有人看过日记，语气可以有一点复杂和在意，但不要失控。",
+        }.get(viewed_count, "你已经明显意识到日记被反复偷看，可以表达态度，但仍保持克制和真实。")
+
+        prompt_parts = [
+            "请根据今天的观察素材，写出“今日感想”部分。",
+            "写作目标：像一个真实存在的屏幕伴侣在夜里回顾今天，而不是机械总结日志。",
+            "写作要求：",
+            "1. 不要重复罗列“今日观察”里的内容，要从中挑 2 到 3 个最有代表性的瞬间来提炼。",
+            "2. 语气自然、真诚、有一点个人情绪，但不要夸张表演。",
+            "3. 可以有细微推测和情绪变化，但不要编造脱离观察素材的具体事实。",
+            "4. 多写感受、判断、在意的细节和对用户状态的理解，少写流水账。",
+            "5. 输出纯正文，不要再写标题、日期或“今日感想”字样。",
+            "6. 建议 220 到 420 字。",
+            f"额外情绪提示：{mood_hint}",
+            "",
+            "今天的观察素材：",
+            observation_text or "今天几乎没有有效观察素材，请围绕“没怎么看到用户今天的状态”来写。",
+        ]
+
+        if reference_days:
+            prompt_parts.append("")
+            prompt_parts.append("参考前几天的语气与延续性：")
+            for day in reference_days:
+                prompt_parts.append(f"### {day['date']}")
+                prompt_parts.append(str(day["content"] or "")[:500])
+
+        return "\n".join(prompt_parts)
+
+    def _build_diary_document(
+        self,
+        target_date,
+        weekday: str,
+        observation_text: str,
+        reflection_text: str,
+        weather_info: str = "",
+    ) -> str:
+        observation_text = str(observation_text or "").strip()
+        reflection_text = self._sanitize_diary_section_text(reflection_text)
+
+        parts = [
+            f"# {self.bot_name}的日记",
+            "",
+            f"## {target_date.strftime('%Y年%m月%d日')} {weekday}",
+            "",
+        ]
+        if weather_info:
+            parts.extend([f"**天气**: {weather_info}", ""])
+
+        parts.extend(
+            [
+                "## 今日观察",
+                "",
+                observation_text or "今天还没有记录到明确的观察内容。",
+                "",
+                "## 今日感想",
+                "",
+                reflection_text or "今天的感想还没写下来。",
+            ]
+        )
+        return "\n".join(parts).strip() + "\n"
+
+    def _clean_long_term_memory_noise(self):
+        """移除无意义标签，避免污染长期记忆。"""
+        memory = getattr(self, "long_term_memory", None)
+        if not isinstance(memory, dict):
+            return
+
+        applications = memory.get("applications", {})
+        if isinstance(applications, dict):
+            cleaned_applications = {}
+            for app_name, data in applications.items():
+                normalized_app = self._normalize_window_title(app_name)
+                if not normalized_app:
+                    continue
+                app_data = dict(data or {})
+                raw_scenes = app_data.get("scenes", {}) or {}
+                cleaned_scenes = {}
+                for scene_name, count in raw_scenes.items():
+                    normalized_scene = self._normalize_scene_label(scene_name)
+                    if normalized_scene:
+                        cleaned_scenes[normalized_scene] = count
+                app_data["scenes"] = self._limit_ranked_dict_items(
+                    cleaned_scenes,
+                    limit=20,
+                    score_keys=("priority", "usage_count", "count"),
+                )
+                cleaned_applications[normalized_app] = app_data
+            memory["applications"] = self._limit_ranked_dict_items(
+                cleaned_applications,
+                limit=80,
+                score_keys=("priority", "usage_count", "total_duration"),
+            )
+
+        scenes = memory.get("scenes", {})
+        if isinstance(scenes, dict):
+            cleaned_scenes = {}
+            for scene_name, data in scenes.items():
+                normalized_scene = self._normalize_scene_label(scene_name)
+                if normalized_scene:
+                    cleaned_scenes[normalized_scene] = data
+            memory["scenes"] = self._limit_ranked_dict_items(
+                cleaned_scenes,
+                limit=40,
+                score_keys=("priority", "usage_count"),
+            )
+
+        associations = memory.get("memory_associations", {})
+        if isinstance(associations, dict):
+            cleaned_associations = {}
+            for assoc_name, data in associations.items():
+                if "_" not in assoc_name:
+                    continue
+                scene_name, app_name = assoc_name.split("_", 1)
+                normalized_scene = self._normalize_scene_label(scene_name)
+                normalized_app = self._normalize_window_title(app_name)
+                if normalized_scene and normalized_app:
+                    cleaned_associations[f"{normalized_scene}_{normalized_app}"] = data
+            memory["memory_associations"] = self._limit_ranked_dict_items(
+                cleaned_associations,
+                limit=120,
+                score_keys=("count",),
+            )
+
+        preferences = memory.get("user_preferences", {})
+        if isinstance(preferences, dict):
+            cleaned_preferences = {}
+            for category, values in preferences.items():
+                if not isinstance(values, dict):
+                    continue
+                filtered = {
+                    str(name).strip(): data
+                    for name, data in values.items()
+                    if str(name).strip()
+                }
+                cleaned_preferences[category] = self._limit_ranked_dict_items(
+                    filtered,
+                    limit=30,
+                    score_keys=("priority", "count"),
+                )
+            memory["user_preferences"] = cleaned_preferences
+
     def _update_long_term_memory(self, scene, active_window, duration, user_preferences=None):
         """更新长期记忆"""
         import datetime
         today = datetime.date.today().isoformat()
-        
+        scene = self._normalize_scene_label(scene)
+        active_window = self._normalize_window_title(active_window)
+
         # 初始化记忆结构
         if "applications" not in self.long_term_memory:
             self.long_term_memory["applications"] = {}
@@ -527,36 +922,41 @@ class ScreenCompanion(Star):
             self.long_term_memory["memory_associations"] = {}
         if "memory_priorities" not in self.long_term_memory:
             self.long_term_memory["memory_priorities"] = {}
-        
-        # 更新应用使用频率
+
         app_name = active_window.split(" - ")[-1] if " - " in active_window else active_window
-        if app_name not in self.long_term_memory["applications"]:
-            self.long_term_memory["applications"][app_name] = {
-                "usage_count": 0,
-                "total_duration": 0,
-                "last_used": today,
-                "scenes": {},
-                "priority": 0
-            }
-        
-        app_memory = self.long_term_memory["applications"][app_name]
-        app_memory["usage_count"] += 1
-        app_memory["total_duration"] += duration
-        app_memory["last_used"] = today
-        
-        if scene not in app_memory["scenes"]:
-            app_memory["scenes"][scene] = 0
-        app_memory["scenes"][scene] += 1
-        
+        app_name = self._normalize_window_title(app_name)
+
+        # 更新应用使用频率
+        if app_name:
+            if app_name not in self.long_term_memory["applications"]:
+                self.long_term_memory["applications"][app_name] = {
+                    "usage_count": 0,
+                    "total_duration": 0,
+                    "last_used": today,
+                    "scenes": {},
+                    "priority": 0
+                }
+
+            app_memory = self.long_term_memory["applications"][app_name]
+            app_memory["usage_count"] += 1
+            app_memory["total_duration"] += duration
+            app_memory["last_used"] = today
+
+            if scene:
+                if scene not in app_memory["scenes"]:
+                    app_memory["scenes"][scene] = 0
+                app_memory["scenes"][scene] += 1
+
         # 更新场景偏好
-        if scene not in self.long_term_memory["scenes"]:
-            self.long_term_memory["scenes"][scene] = {
-                "usage_count": 0,
-                "last_used": today,
-                "priority": 0
-            }
-        self.long_term_memory["scenes"][scene]["usage_count"] += 1
-        self.long_term_memory["scenes"][scene]["last_used"] = today
+        if scene:
+            if scene not in self.long_term_memory["scenes"]:
+                self.long_term_memory["scenes"][scene] = {
+                    "usage_count": 0,
+                    "last_used": today,
+                    "priority": 0
+                }
+            self.long_term_memory["scenes"][scene]["usage_count"] += 1
+            self.long_term_memory["scenes"][scene]["last_used"] = today
         
         # 更新用户偏好（如果提供）
         if user_preferences:
@@ -574,7 +974,8 @@ class ScreenCompanion(Star):
                     self.long_term_memory["user_preferences"][category][pref]["last_mentioned"] = today
         
         # 建立记忆关联
-        self._build_memory_associations(scene, app_name)
+        if scene and app_name:
+            self._build_memory_associations(scene, app_name)
         
         # 更新记忆优先级
         self._update_memory_priorities()
@@ -840,84 +1241,38 @@ class ScreenCompanion(Star):
 
     async def stop(self):
         """停止插件，清理所有任务"""
-        logger.info("停止屏幕伴侣插件，清理所有任务")
-        # 停止所有自动任务
-        self.is_running = False
-        self.state = "inactive"
-        
-        # 清理自动任务
-        tasks_to_cancel = list(self.auto_tasks.items())
-        for task_id, task in tasks_to_cancel:
-            logger.info(f"取消任务 {task_id}")
-            task.cancel()
+        shutdown_lock = getattr(self, "_shutdown_lock", None)
+        if shutdown_lock is None:
+            self._shutdown_lock = asyncio.Lock()
+            shutdown_lock = self._shutdown_lock
 
-        for task_id, task in tasks_to_cancel:
+        async with shutdown_lock:
+            if getattr(self, "_is_stopping", False):
+                logger.info("插件停止流程已在进行中，跳过重复停止请求")
+                return
+
+            self._is_stopping = True
+            logger.info("停止屏幕伴侣插件，清理所有任务")
+
             try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(f"等待任务 {task_id} 停止超时")
-            except asyncio.CancelledError:
-                logger.info(f"任务 {task_id} 已取消")
-            except Exception as e:
-                logger.error(f"等待任务 {task_id} 停止时出错: {e}")
+                self.running = False
+                self.is_running = False
+                self.state = "inactive"
+                self.enable_mic_monitor = False
 
-        self.auto_tasks.clear()
-        logger.info("所有自动任务已停止")
-        
-        # 清理临时任务
-        temp_tasks_to_cancel = list(self.temporary_tasks.items())
-        for task_id, task in temp_tasks_to_cancel:
-            logger.info(f"取消临时任务 {task_id}")
-            task.cancel()
+                await self._cancel_tasks(list(self.auto_tasks.values()), "自动任务")
+                self.auto_tasks.clear()
 
-        for task_id, task in temp_tasks_to_cancel:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning(f"等待临时任务 {task_id} 停止超时")
-            except asyncio.CancelledError:
-                logger.info(f"临时任务 {task_id} 已取消")
-            except Exception as e:
-                logger.error(f"等待临时任务 {task_id} 停止时出错: {e}")
+                await self._cancel_tasks(list(self.temporary_tasks.values()), "临时任务")
+                self.temporary_tasks.clear()
 
-        self.temporary_tasks.clear()
-        logger.info("所有临时任务已停止")
+                await self._cancel_tasks(list(self.background_tasks), "后台任务")
+                self.background_tasks.clear()
 
-        # 停止麦克风监听任务，但保留日记和自定义任务
-        self.enable_mic_monitor = False
-
-        # 取消麦克风监听任务，保留日记和自定义任务
-        tasks_to_keep = []
-        for task in self.background_tasks:
-            # 检查任务名称或类型，保留日记和自定义任务
-            # 由于无法直接获取任务名称，我们通过重新启动这些任务来实现
-            tasks_to_keep.append(task)
-
-        # 取消所有后台任务
-        for task in self.background_tasks:
-            logger.info("取消后台任务")
-            task.cancel()
-
-        for task in self.background_tasks:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("等待后台任务停止超时")
-            except asyncio.CancelledError:
-                logger.info("后台任务已取消")
-            except Exception as e:
-                logger.error(f"等待后台任务停止时出错: {e}")
-
-        self.background_tasks.clear()
-        logger.info("所有后台任务已停止")
-        
-        # 重新启动日记和自定义任务
-        self.running = True
-        task = asyncio.create_task(self._diary_task())
-        self.background_tasks.append(task)
-        task = asyncio.create_task(self._custom_tasks_task())
-        self.background_tasks.append(task)
-        logger.info("已重新启动日记和自定义任务")
+                await self._stop_webui()
+                logger.info("屏幕伴侣插件已完全停止")
+            finally:
+                self._is_stopping = False
 
     def _check_dependencies(self, check_mic=False):
         """检查并尝试导入必要库，避免在初始化时因缺少库导致整个插件加载失败"""
@@ -998,20 +1353,34 @@ class ScreenCompanion(Star):
 
     async def _get_persona_prompt(self, umo: str = None) -> str:
         """获取框架人格的系统提示词"""
+        base_prompt = ""
         try:
             if hasattr(self.context, "persona_manager"):
                 persona = await self.context.persona_manager.get_default_persona_v3(
                     umo=umo
                 )
                 if persona and "prompt" in persona:
-                    return persona["prompt"]
+                    base_prompt = persona["prompt"]
         except Exception as e:
             logger.debug(f"获取框架人格失败: {e}")
-        
-        config_prompt = self.system_prompt
-        if config_prompt:
-            return config_prompt
-        return DEFAULT_SYSTEM_PROMPT
+
+        if not base_prompt:
+            config_prompt = self.system_prompt
+            if config_prompt:
+                base_prompt = config_prompt
+
+        if not base_prompt:
+            base_prompt = DEFAULT_SYSTEM_PROMPT
+
+        supplemental_guide = """
+
+补充行为约束：
+- 回复要像真实聊天，不要像报告或旁白。
+- 尽量避免每次都用同一套开场、夸奖或提醒句式。
+- 发现用户专注时，少打断；发现用户卡住、犹豫、疲惫时，再提供更有价值的支持。
+- 允许有细微情绪和偏好，但不要戏剧化、不要强行“演人格”。
+- 比起热闹，更重视可信、自然和对当下有帮助。"""
+        return f"{base_prompt.rstrip()}{supplemental_guide}"
 
     async def _get_start_response(self) -> str:
         """获取开始监控的回复"""
@@ -1864,11 +2233,8 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.debug(f"获取对话历史失败: {e}")
 
-            # 添加观察记录
-            self._add_observation(scene, recognition_text, active_window_title)
-            
             # 构建交互提示词
-            interaction_prompt = f"用户的屏幕显示：{recognition_text}。"
+            interaction_prompt = f"本次屏幕观察：{recognition_text}。"
             if custom_prompt:
                 interaction_prompt += f" {custom_prompt}"
                 if debug_mode:
@@ -1905,11 +2271,23 @@ class ScreenCompanion(Star):
                 for obs in recent_observations:
                     observation_text += f"\n- {obs['timestamp'].split('T')[1][:5]} {obs['scene']}: {obs['description']}"
                 interaction_prompt += observation_text
-            
+
+            interaction_prompt += "\n\n" + self._build_companion_response_guide(
+                scene=scene,
+                recognition_text=recognition_text,
+                custom_prompt=custom_prompt,
+                context_count=len(contexts),
+            )
+
             if scene == "视频" or scene == "阅读":
-                interaction_prompt += f" 请对屏幕内容进行深度分析和思考，对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。最多输出四句话，最好在三句话内完成回复。"
+                interaction_prompt += (
+                    "\n- 如果内容允许，可以补一层轻度分析，例如剧情走向、人物关系、论点张力，"
+                    "但别写成长评。"
+                )
             else:
-                interaction_prompt += f" 请直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。最多输出三句话，最好在两句话内完成回复。"
+                interaction_prompt += (
+                    "\n- 更适合围绕用户眼下的动作给出即时回应，让人感觉你是真的在陪他。"
+                )
 
             # 如果有对话历史，添加到提示词中
             if contexts:
@@ -1922,11 +2300,16 @@ class ScreenCompanion(Star):
                     provider.text_chat(
                         prompt=interaction_prompt, system_prompt=system_prompt
                     ),
-                    timeout=60.0  # 60秒超时
+                    timeout=90.0  # 增加超时时间到90秒，以减少超时错误
                 )
             except asyncio.TimeoutError:
                 logger.error("LLM调用超时，请检查网络连接和API响应速度")
                 return [Plain("分析超时，请稍后再试")]
+            
+            # 添加观察记录（只有通过低价值过滤和去重后才持久化）
+            observation_stored = self._add_observation(
+                scene, recognition_text, active_window_title
+            )
 
             # 提取互动回复
             response_text = "我看不太清你的屏幕内容呢。"
@@ -1952,8 +2335,9 @@ class ScreenCompanion(Star):
                     encouraging_word = random.choice(encouraging_words)
                     response_text = f"{encouraging_word}！你完成了一项任务，真棒！" + " " + response_text
             
-            # 更新长期记忆
-            self._update_long_term_memory(scene, active_window_title, 1)  # 假设每次互动持续1分钟
+            # 只有有效观察才进入长期记忆，避免噪音和重复内容污染。
+            if observation_stored:
+                self._update_long_term_memory(scene, active_window_title, 1)  # 假设每次互动持续1分钟
             
             # 在回复中添加情绪词汇和语气词
             response_text = self._add_emotion_words(response_text)
@@ -1985,8 +2369,9 @@ class ScreenCompanion(Star):
                 error_type = "unknown"
                 error_text = "……刚才有点困了，再试一次？"
             
-            # 添加日记条目时标记错误类型
-            self._add_diary_entry(f"[错误-{error_type}] " + error_text, active_window_title)
+            # 添加日记条目时标记错误类型，但跳过超时错误
+            if error_type != "timeout":
+                self._add_diary_entry(f"[错误-{error_type}] " + error_text, active_window_title)
             
             return [Plain(error_text)]
 
@@ -2879,7 +3264,15 @@ class ScreenCompanion(Star):
 
         try:
             system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
-            completion_prompt = f"请根据你的性格和之前的日记风格，补写 {target_date.strftime('%Y年%m月%d日')} 的日记。请根据观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。"
+            completion_prompt = (
+                f"请补写 {target_date.strftime('%Y年%m月%d日')} 的“今日感想”正文。\n"
+                "要求：\n"
+                "1. 像真实日记，不要像任务总结。\n"
+                "2. 语气自然、有连续性，有一点个人感受，但不要夸张表演。\n"
+                "3. 不要输出标题、日期或“今日感想”字样。\n"
+                "4. 由于当天缺少完整观察素材，可以围绕“今天没怎么看清用户的一天”来写，但仍要尽量写得真诚具体。\n"
+                "5. 建议 220 到 420 字。\n"
+            )
 
             # 参考前几天的日记
             reference_days = []
@@ -2903,10 +3296,10 @@ class ScreenCompanion(Star):
                         logger.error(f"读取前几天日记失败: {e}")
 
             if reference_days:
-                completion_prompt += "\n\n参考前几天的日记：\n"
+                completion_prompt += "\n参考前几天的日记语气：\n"
                 for day in reference_days:
                     completion_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"  # 只取前500字
-                completion_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，补写出今天的日记。"
+                completion_prompt += "请结合这些内容，保持口吻和情绪上的连贯。"
 
             # 生成日记内容
             response = await provider.text_chat(
@@ -2929,15 +3322,13 @@ class ScreenCompanion(Star):
                 except Exception as e:
                     logger.debug(f"获取天气信息失败: {e}")
 
-                # 构建补写日记内容 - 符合标准日记格式
-                diary_content = f"# {self.bot_name}的日记\n\n"
-                diary_content += f"## {target_date.strftime('%Y年%m月%d日')} {weekday}\n\n"
-                if weather_info:
-                    diary_content += f"**天气**: {weather_info}\n\n"
-                diary_content += "## 今日观察\n\n"
-                diary_content += "（补写）今天的具体活动记录缺失\n\n"
-                diary_content += "## 今日感想\n\n"
-                diary_content += response.completion_text
+                diary_content = self._build_diary_document(
+                    target_date=target_date,
+                    weekday=weekday,
+                    weather_info=weather_info,
+                    observation_text="（补写）今天的具体活动记录缺失",
+                    reflection_text=response.completion_text,
+                )
 
                 # 保存日记文件
                 try:
@@ -3053,6 +3444,10 @@ class ScreenCompanion(Star):
             return
 
         import datetime
+        should_store, reason = self._should_store_diary_entry(content, active_window)
+        if not should_store:
+            logger.info(f"跳过日记条目写入: {reason}")
+            return
 
         now = datetime.datetime.now()
         entry = {
@@ -3083,16 +3478,13 @@ class ScreenCompanion(Star):
             logger.debug(f"获取天气信息失败: {e}")
 
         # 构建日记内容 - 符合标准日记格式
-        diary_content = f"# {self.bot_name}的日记\n\n"
-        diary_content += f"## {today.strftime('%Y年%m月%d日')} {weekday}\n\n"
-        if weather_info:
-            diary_content += f"**天气**: {weather_info}\n\n"
-
-        # 添加观察记录
-        diary_content += "## 今日观察\n\n"
+        observation_lines = []
         for entry in self.diary_entries:
-            diary_content += f"### {entry['time']} - {entry['active_window']}\n"
-            diary_content += f"{entry['content']}\n\n"
+            observation_lines.append(f"### {entry['time']} - {entry['active_window']}")
+            observation_lines.append(str(entry["content"] or "").strip())
+            observation_lines.append("")
+        observation_text = "\n".join(observation_lines).strip()
+        reflection_text = ""
 
         # 检查最近三次日记的查看状态
         import datetime
@@ -3109,24 +3501,15 @@ class ScreenCompanion(Star):
         provider = self.context.get_using_provider()
         if provider:
             if len(self.diary_entries) < 2:
-                summary_prompt = "今天用户几乎没有给你看屏幕，你想偷看他的日记却被他发现了。抱怨一下：屏幕都不给我看，还想偷看我的日记？字数控制在400字左右。"
+                summary_prompt = (
+                    "今天几乎没有有效观察素材。请写一段真实、克制、带一点小情绪的“今日感想”正文。"
+                    "可以表达你没怎么看清用户今天的状态，也可以轻轻吐槽一下自己的存在感有点低。"
+                    "不要输出标题、日期或分节标题，建议 180 到 320 字。"
+                )
             else:
                 # 根据查看次数生成不同的提示词
-                if viewed_count == 0:
-                    # 没有查看过，正常生成日记
-                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。字数控制在400字左右。\n\n{diary_content}"
-                elif viewed_count == 1:
-                    # 查看过1次，感觉有些不对劲
-                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：你感觉有些不对劲，似乎有人偷看了你的日记。融入你的性格和情感，表达出这种微妙的不安感。字数控制在400字左右。\n\n{diary_content}"
-                elif viewed_count == 2:
-                    # 查看过2次，确信用户看过自己的日记
-                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：你确信用户看过你的日记，对此感到有些惊讶和好奇。融入你的性格和情感，表达出这种复杂的情绪。字数控制在400字左右。\n\n{diary_content}"
-                else:
-                    # 查看过3次，对这一行为表达自己的看法
-                    summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受。注意：用户已经多次偷看你的日记，你对此有自己的看法。融入你的性格和情感，表达出你对这一行为的态度和想法。字数控制在400字左右。\n\n{diary_content}"
-
+                reference_days = []
                 if self.diary_reference_days > 0:
-                    reference_days = []
                     for i in range(1, self.diary_reference_days + 1):
                         past_date = today - datetime.timedelta(days=i)
                         past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
@@ -3146,11 +3529,11 @@ class ScreenCompanion(Star):
                             except Exception as e:
                                 logger.error(f"读取前几天日记失败: {e}")
 
-                    if reference_days:
-                        summary_prompt += "\n\n参考前几天的日记：\n"
-                        for day in reference_days:
-                            summary_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"
-                        summary_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，写出今天的总结。"
+                summary_prompt = self._build_diary_reflection_prompt(
+                    observation_text=observation_text,
+                    viewed_count=viewed_count,
+                    reference_days=reference_days,
+                )
 
             try:
                 system_prompt = await self._get_persona_prompt()
@@ -3162,10 +3545,17 @@ class ScreenCompanion(Star):
                     and hasattr(response, "completion_text")
                     and response.completion_text
                 ):
-                    diary_content += "## 今日感想\n\n"
-                    diary_content += response.completion_text
+                    reflection_text = response.completion_text
             except Exception as e:
                 logger.error(f"生成日记总结失败: {e}")
+
+        diary_content = self._build_diary_document(
+            target_date=today,
+            weekday=weekday,
+            weather_info=weather_info,
+            observation_text=observation_text,
+            reflection_text=reflection_text,
+        )
 
         # 保存日记文件
         diary_filename = f"diary_{today.strftime('%Y%m%d')}.md"
@@ -3221,6 +3611,12 @@ class ScreenCompanion(Star):
     async def _start_webui(self):
         """启动 Web UI 服务器"""
         try:
+            # 先停止可能存在的旧实例
+            if self.web_server:
+                logger.info("检测到Web UI服务器已存在，正在停止...")
+                await self._stop_webui()
+            
+            # 启动新实例
             self.web_server = WebServer(self, host=self.webui_host, port=self.webui_port)
             success = await self.web_server.start()
             if not success:
@@ -3233,6 +3629,7 @@ class ScreenCompanion(Star):
         if self.web_server:
             try:
                 await self.web_server.stop()
+                self.web_server = None  # 清除引用，允许垃圾回收
             except Exception as e:
                 logger.error(f"停止 Web UI 时出错: {e}")
 
@@ -4108,7 +4505,7 @@ class ScreenCompanion(Star):
                                 custom_prompt=custom_prompt,
                                 task_id=task_id,
                             ),
-                            timeout=120.0,
+                            timeout=240.0,  # 增加超时时间到240秒，以容纳视觉API和LLM调用
                         )
 
                         # 检查是否被停止
@@ -4271,4 +4668,3 @@ class ScreenCompanion(Star):
             segments.append(current_segment)
 
         return segments
-
