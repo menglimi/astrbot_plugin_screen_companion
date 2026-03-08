@@ -473,7 +473,7 @@ class WebServer:
         try:
             return self._ok({
                 "version": "1.0.0",
-                "plugin_version": "2.3.0"
+                "plugin_version": "2.3.1"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")

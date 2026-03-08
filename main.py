@@ -1064,10 +1064,12 @@ class ScreenCompanion(Star):
         from PIL import Image, ImageDraw, ImageFont
         import tempfile
 
-        font_size = 20
+        # 优化字体大小和行高
+        font_size = 18
         line_height = int(font_size * 1.8)
-        padding = 50
-        max_width = 800
+        title_font_size = 24
+        padding = 60
+        max_width = 850
 
         chinese_fonts = [
             "C:/Windows/Fonts/msyh.ttc",
@@ -1081,6 +1083,7 @@ class ScreenCompanion(Star):
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ]
 
+        # 加载普通字体
         font = None
         for font_path in chinese_fonts:
             try:
@@ -1091,14 +1094,28 @@ class ScreenCompanion(Star):
             except Exception:
                 continue
 
+        # 加载标题字体
+        title_font = None
+        for font_path in chinese_fonts:
+            try:
+                title_font = ImageFont.truetype(font_path, title_font_size)
+                break
+            except Exception:
+                continue
+
         if font is None:
             try:
                 font = ImageFont.load_default()
             except Exception:
                 font = None
 
-        def get_text_width(text):
-            if font:
+        if title_font is None:
+            title_font = font
+
+        def get_text_width(text, use_title_font=False):
+            if use_title_font and title_font:
+                return title_font.getlength(text)
+            elif font:
                 return font.getlength(text)
             return len(text) * font_size
 
@@ -1127,42 +1144,58 @@ class ScreenCompanion(Star):
                     title_count += 1
 
         # 计算总高度，为标题行增加额外空间
-        title_extra_height = title_count * 4  # 每个标题额外增加4像素
-        total_height = padding * 2 + len(lines) * line_height + title_extra_height + 20
-        total_height = max(300, total_height)  # 增加最小高度
+        title_extra_height = title_count * 10  # 每个标题额外增加10像素
+        total_height = padding * 2 + len(lines) * line_height + title_extra_height + 30
+        total_height = max(400, total_height)  # 增加最小高度
 
-        image = Image.new('RGB', (max_width, total_height), color=(255, 253, 245))
+        # 优化背景颜色和边框
+        image = Image.new('RGB', (max_width, total_height), color=(255, 254, 250))
         draw = ImageDraw.Draw(image)
 
+        # 绘制更美观的边框
+        border_color = (180, 160, 140)
+        border_width = 3
+        border_padding = 15
         draw.rectangle(
-            [(padding - 10, padding - 10), (max_width - padding + 10, total_height - padding + 10)],
-            outline=(200, 180, 160),
-            width=2
+            [(padding - border_padding, padding - border_padding), (max_width - padding + border_padding, total_height - padding + border_padding)],
+            outline=border_color,
+            width=border_width
+        )
+
+        # 绘制装饰性线条
+        draw.line(
+            [(padding, padding + 40), (max_width - padding, padding + 40)],
+            fill=border_color,
+            width=1
         )
 
         y = padding
         for line in lines:
             if line.startswith('【') and '日记' in line:
-                title_font = None
-                for font_path in chinese_fonts:
-                    try:
-                        title_font = ImageFont.truetype(font_path, font_size + 4)
-                        break
-                    except Exception:
-                        continue
-                if title_font is None:
-                    title_font = font
-                draw.text((padding, y), line, fill=(139, 69, 19), font=title_font)
-                y += line_height + 4  # 标题行使用更大的行高
+                # 标题居中显示
+                title_width = get_text_width(line, use_title_font=True)
+                title_x = (max_width - title_width) // 2
+                draw.text((title_x, y), line, fill=(139, 69, 19), font=title_font)
+                y += line_height + 10  # 标题行使用更大的行高
             elif line and line[0].isdigit() and '年' in line:
-                draw.text((padding, y), line, fill=(100, 100, 100), font=font)
-                y += line_height
+                # 日期居中显示
+                date_width = get_text_width(line)
+                date_x = (max_width - date_width) // 2
+                draw.text((date_x, y), line, fill=(100, 100, 100), font=font)
+                y += line_height + 5
             else:
-                draw.text((padding, y), line, fill=(60, 60, 60), font=font)
+                # 正文左对齐，增加首行缩进
+                if line.strip():
+                    # 检查是否是段落的第一行
+                    if len(lines) > 0 and lines.index(line) > 0 and lines[lines.index(line) - 1].strip() == '':
+                        # 首行缩进
+                        draw.text((padding + 20, y), line, fill=(60, 60, 60), font=font)
+                    else:
+                        draw.text((padding, y), line, fill=(60, 60, 60), font=font)
                 y += line_height
 
         temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        image.save(temp_file, format="PNG")
+        image.save(temp_file, format="PNG", quality=95)
         temp_file.close()
 
         return temp_file.name
@@ -1175,14 +1208,34 @@ class ScreenCompanion(Star):
             import os
             from PIL import Image
 
-            # 共享目录路径，优先使用环境变量，默认值为/AstrBot/data/screenshots
+            # 共享目录路径
             import os
-            screenshots_dir = os.environ.get("SCREENSHOT_DIR", "/AstrBot/data/screenshots")
             
-            # 检查共享目录是否存在
+            # 优先使用环境变量
+            screenshots_dir = os.environ.get("SCREENSHOT_DIR")
+            
+            # 如果没有环境变量，尝试使用AstrBot数据目录
+            if not screenshots_dir:
+                # 尝试从当前文件路径推断AstrBot数据目录
+                try:
+                    # 当前文件路径: plugins/astrbot_plugin_screen_companion/main.py
+                    # 目标路径: screenshots/
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    screenshots_dir = os.path.join(current_dir, '..', '..', 'screenshots')
+                    # 规范化路径
+                    screenshots_dir = os.path.normpath(screenshots_dir)
+                except Exception:
+                    # 如果失败，使用Windows默认路径
+                    screenshots_dir = "c:\\Users\\99505\\.astrbot\\data\\screenshots"
+            
+            # 检查共享目录是否存在，如果不存在则创建
             if not os.path.exists(screenshots_dir):
-                logger.error(f"共享目录不存在: {screenshots_dir}")
-                # 回退到容器内截图（如果支持）
+                try:
+                    os.makedirs(screenshots_dir, exist_ok=True)
+                    logger.info(f"创建共享目录: {screenshots_dir}")
+                except Exception as e:
+                    logger.error(f"创建共享目录失败: {e}")
+                    # 回退到容器内截图（如果支持）
                 try:
                     import pyautogui
                     screenshot = pyautogui.screenshot()
@@ -1681,6 +1734,13 @@ class ScreenCompanion(Star):
         task_id: str = "unknown",
     ) -> list[BaseMessageComponent]:
         """使用外接视觉API进行图像分析，然后通过AstrBot的LLM进行人格化回复"""
+        # 检查是否在休息时间段内，如果是，不允许触发事件
+        if self._is_in_rest_time_range():
+            logger.info(
+                f"[任务 {task_id}] 在休息时间段内，取消视觉API调用"
+            )
+            return []
+        
         # 在调用视觉API之前再次检查活跃时间段
         if not self._is_in_active_time_range():
             logger.info(
@@ -1824,6 +1884,11 @@ class ScreenCompanion(Star):
                     interaction_prompt += f" {weather_prompt}"
                 if system_status_prompt:
                     interaction_prompt += f" {system_status_prompt}"
+            
+            # 检查是否在休息提醒时间段内，如果是，添加休息提醒
+            if self._is_in_rest_reminder_range():
+                interaction_prompt += " 休息时间快到了，建议用户早点休息，保持良好的作息习惯。"
+                logger.info(f"[任务 {task_id}] 在休息提醒时间段内，添加休息提醒")
             
             # 触发相关记忆
             related_memories = self._trigger_related_memories(scene, active_window_title)
@@ -2427,7 +2492,11 @@ class ScreenCompanion(Star):
                 summary_content = diary_content[summary_start:]
                 # 提取感想文本，去除标题
                 summary_lines = summary_content.split('\n')
-                summary_text = '\n'.join(summary_lines[2:]).strip()
+                # 跳过标题行和空行
+                start_idx = 2
+                while start_idx < len(summary_lines) and (summary_lines[start_idx].strip().startswith('#') or not summary_lines[start_idx].strip()):
+                    start_idx += 1
+                summary_text = '\n'.join(summary_lines[start_idx:]).strip()
                 # 限制在500字以下
                 if len(summary_text) > 500:
                     summary_text = summary_text[:497] + "..."
@@ -2912,6 +2981,71 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"解析时间段失败: {e}")
             return True
+
+    def _is_in_rest_time_range(self):
+        """检查当前时间是否在休息时间段内"""
+        # 使用配置的休息时间段
+        time_range = self.rest_time_range
+
+        if not time_range:
+            return False
+
+        try:
+            import datetime
+
+            now = datetime.datetime.now().time()
+            start_str, end_str = time_range.split("-")
+            start_hour, start_minute = map(int, start_str.split(":"))
+            end_hour, end_minute = map(int, end_str.split(":"))
+
+            start_time = datetime.time(start_hour, start_minute)
+            end_time = datetime.time(end_hour, end_minute)
+
+            if start_time <= end_time:
+                return start_time <= now <= end_time
+            else:
+                # 跨午夜的情况
+                return now >= start_time or now <= end_time
+        except Exception as e:
+            logger.error(f"解析休息时间段失败: {e}")
+            return False
+
+    def _is_in_rest_reminder_range(self):
+        """检查当前时间是否在休息时间段之前的提醒范围内（默认30分钟）"""
+        # 使用配置的休息时间段
+        time_range = self.rest_time_range
+
+        if not time_range:
+            return False
+
+        try:
+            import datetime
+
+            now = datetime.datetime.now().time()
+            start_str, end_str = time_range.split("-")
+            start_hour, start_minute = map(int, start_str.split(":"))
+            
+            # 计算休息时间段开始前30分钟的时间
+            reminder_hour = start_hour
+            reminder_minute = start_minute - 30
+            if reminder_minute < 0:
+                reminder_hour -= 1
+                reminder_minute += 60
+            if reminder_hour < 0:
+                reminder_hour += 24
+            
+            reminder_time = datetime.time(reminder_hour, reminder_minute)
+            start_time = datetime.time(start_hour, start_minute)
+
+            if reminder_time <= start_time:
+                # 不跨午夜的情况
+                return reminder_time <= now < start_time
+            else:
+                # 跨午夜的情况
+                return now >= reminder_time or now < start_time
+        except Exception as e:
+            logger.error(f"解析休息提醒时间段失败: {e}")
+            return False
 
     def _add_diary_entry(self, content: str, active_window: str):
         """添加日记条目"""
@@ -3495,21 +3629,177 @@ class ScreenCompanion(Star):
                 logger.error(f"麦克风监听任务异常: {e}")
                 await asyncio.sleep(self.mic_check_interval)
 
+    def __init__(self, context: Context, config: dict):
+        import os
+
+        super().__init__(context)
+        
+        # 初始化插件配置
+        self.plugin_config = PluginConfig(config, context)
+        
+        # 同步配置到实例属性
+        self._sync_all_config()
+        
+        self.auto_tasks = {}
+        self.is_running = False
+        self.task_counter = 0
+        self.running = True
+        self.background_tasks = []
+        # 状态管理
+        self.state = "inactive"  # active, inactive, temporary
+        self.temporary_tasks = {}
+        # 固定自动化任务ID
+        self.AUTO_TASK_ID = "task_0"
+
+        # 日记功能相关
+        self.diary_entries = []
+        self.last_diary_date = None
+
+        # 初始化日记存储路径
+        if not self.diary_storage:
+            self.diary_storage = str(self.plugin_config.diary_dir)
+        os.makedirs(self.diary_storage, exist_ok=True)
+
+        # 自定义监控任务相关
+        self.parsed_custom_tasks = []
+        self._parse_custom_tasks()
+        # 跟踪任务最后执行日期
+        self.last_task_execution = {}
+
+        # 麦克风监听相关
+        self.last_mic_trigger = 0  # 上次触发时间，用于防抖
+        self.mic_debounce_time = 60  # 防抖时间，单位秒
+
+        # 用户偏好和学习相关
+        self.parsed_preferences = {}
+        self.learning_data = {}
+
+        self.custom_presets = self.plugin_config.custom_presets
+        self.current_preset_index = self.plugin_config.current_preset_index
+        self.parsed_custom_presets = []
+        self._parse_custom_presets()
+        # 确保预设索引有效
+        if self.current_preset_index >= len(self.parsed_custom_presets):
+            self.current_preset_index = -1
+
+        # 互动模式状态跟踪
+        self.last_interaction_mode = self.interaction_mode
+        self.last_check_interval = self.check_interval
+        self.last_trigger_probability = self.trigger_probability
+        self.last_active_time_range = self.active_time_range
+
+        # 初始化学习数据存储路径
+        if not self.learning_storage:
+            self.learning_storage = str(self.plugin_config.learning_dir)
+        os.makedirs(self.learning_storage, exist_ok=True)
+
+        # 观察记录相关
+        self.observations = []  # 存储观察记录
+
+        # 初始化观察记录存储路径
+        if not self.observation_storage:
+            self.observation_storage = str(self.plugin_config.observations_dir)
+        os.makedirs(self.observation_storage, exist_ok=True)
+
+        # 加载观察记录
+        self._load_observations()
+
+        # Web UI 相关
+        self.web_server = None
+        self._ensure_webui_password()
+
+        # 日记元数据相关（记录日记查看状态）
+        self.diary_metadata = {}
+        self.diary_metadata_file = os.path.join(self.diary_storage, "diary_metadata.json")
+        self._load_diary_metadata()
+
+        # 长期记忆系统
+        self.long_term_memory = {}
+        self.long_term_memory_file = os.path.join(self.learning_storage, "long_term_memory.json")
+        self._load_long_term_memory()
+
+        # 互动频率管理
+        self.user_engagement = 5  # 用户参与度，范围1-10，默认5
+        self.engagement_history = []  # 记录用户参与度历史
+
+        # 情绪词汇和语气词
+        self.emotion_words = {
+            "happy": ["真好", "太棒了", "开心", "高兴", "兴奋", "不错", "很棒", "厉害"],
+            "concerned": ["担心", "注意", "小心", "提醒", "建议"],
+            "curious": ["好奇", "想知道", "有意思", "有趣", "奇怪"],
+            "encouraging": ["加油", "努力", "坚持", "相信你", "做得好"],
+            "casual": ["嗯", "哦", "对了", "你知道吗", "话说", "其实", "不过", "对啦"],
+            "surprised": ["哇", "天哪", "真的吗", "没想到", "太意外了"]
+        }
+
+        # 任务完成检测
+        self.active_tasks = {}  # 记录用户正在进行的任务
+
+        # 学习反馈系统
+        self.corrections = {}  # 记录用户纠正的错误
+        self.corrections_file = os.path.join(self.learning_storage, "corrections.json")
+        self._load_corrections()
+
+        # 不确定性表达词汇
+        self.uncertainty_words = ["可能", "好像", "我记得", "似乎", "大概", "也许", "说不定", "感觉"]
+
+        # 解析用户偏好设置
+        self._parse_user_preferences()
+
+        # 加载学习数据
+        if self.enable_learning:
+            self._load_learning_data()
+
+        # 任务调度器相关
+        self.task_semaphore = asyncio.Semaphore(2)  # 限制同时运行的任务数
+        self.task_queue = asyncio.Queue()
+
+        # 启动任务调度器
+        task = asyncio.create_task(self._task_scheduler())
+        self.background_tasks.append(task)
+
+        # 启动日记任务
+        if self.enable_diary:
+            task = asyncio.create_task(self._diary_task())
+            self.background_tasks.append(task)
+
+        # 启动 Web UI（如果启用）
+        if self.webui_enabled:
+            task = asyncio.create_task(self._start_webui())
+            self.background_tasks.append(task)
+
+        # 启动自定义监控任务
+        task = asyncio.create_task(self._custom_tasks_task())
+        self.background_tasks.append(task)
+
+        # 启动麦克风监听任务
+        task = asyncio.create_task(self._mic_monitor_task())
+        self.background_tasks.append(task)
+
     async def _custom_tasks_task(self):
         """自定义监控任务"""
         while self.running:
             try:
                 now = datetime.datetime.now()
+                current_date = now.date()
                 current_hour = now.hour
                 current_minute = now.minute
 
                 # 检查是否有需要执行的自定义任务
                 for task in self.parsed_custom_tasks:
+                    # 生成任务唯一标识
+                    task_key = f"{task['hour']}:{task['minute']}:{task['prompt']}"
+                    # 检查是否今天已经执行过
+                    if self.last_task_execution.get(task_key) == current_date:
+                        continue
+                    
                     if (
                         task["hour"] == current_hour
                         and task["minute"] == current_minute
                     ):
                         logger.info(f"执行自定义监控任务: {task['prompt']}")
+                        # 标记任务今天已执行
+                        self.last_task_execution[task_key] = current_date
                         # 检查环境
                         ok, err_msg = self._check_env()
                         if not ok:
