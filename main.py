@@ -62,6 +62,7 @@ class ScreenCompanion(Star):
 
         self.last_mic_trigger = 0  # 上次麦克风触发时间
         self.mic_debounce_time = 60  # 麦克风防抖时间，单位为秒
+        self.last_rest_reminder_time = None  # 上次休息提醒时间，用于冷却
 
         self.parsed_preferences = {}
         self.learning_data = {}
@@ -110,19 +111,21 @@ class ScreenCompanion(Star):
         # 互动频率管理
         self.user_engagement = 5  # 用户参与度，范围 1-10
         self.engagement_history = []  # 记录用户参与度历史
-        self.emotion_words = {
-            "happy": ["真好", "太好了", "开心", "高兴", "不错", "挺好"],
-            "concerned": ["担心", "注意", "小心", "提醒", "留意"],
-            "curious": ["好奇", "想知道", "有意思", "有点意思", "挺想看看"],
-            "encouraging": ["加油", "努力", "坚持", "你可以", "做得不错"],
-            "casual": ["哎", "对了", "其实", "不过", "话说回来"],
-            "surprised": ["哇", "天哪", "真的啊", "没想到", "有点意外"],
-        }
 
         self.active_tasks = {}
         self.corrections = {}
         self.corrections_file = os.path.join(self.learning_storage, "corrections.json")
         self._load_corrections()
+        
+        # 窗口变化检测相关
+        self.previous_windows = set()
+        self.window_change_cooldown = 0
+        self.window_timestamps = {}  # 记录窗口首次出现的时间戳
+        
+        # 时间跟踪相关
+        self.current_activity = None  # 当前活动
+        self.activity_start_time = None  # 活动开始时间
+        self.activity_history = []  # 活动历史记录
 
         self.uncertainty_words = ["也许", "可能", "看起来", "我猜", "像是", "大概", "说不定", "似乎"]
 
@@ -169,6 +172,7 @@ class ScreenCompanion(Star):
         self.trigger_probability = self.plugin_config.trigger_probability
         self.active_time_range = self.plugin_config.active_time_range
         self.watch_mode = self.plugin_config.watch_mode
+        self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励，营造沉浸式的陪伴体验。')
         self.capture_mode = self.plugin_config.capture_mode
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
         self.image_prompt = self.plugin_config.image_prompt
@@ -411,6 +415,11 @@ class ScreenCompanion(Star):
             f"这是你被指定要陪伴的窗口：《{window_title}》。",
             "请更关注这个窗口里的当前任务、卡点和下一步，不要泛泛播报画面。",
             "如果适合给建议，优先给和当前任务直接相关、能立刻派上用场的建议。",
+            "保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励。",
+            "营造沉浸式的陪伴体验，让用户感受到持续的支持和关注。",
+            "注意观察窗口内容的变化，及时调整你的回应，确保与当前场景相关。",
+            "如果发现用户遇到困难，提供具体的解决方案和步骤指导。",
+            "在适当的时候给予鼓励和肯定，增强用户的信心和动力。",
         ]
         if extra_prompt:
             pieces.append(extra_prompt.strip())
@@ -803,7 +812,7 @@ class ScreenCompanion(Star):
     @staticmethod
     def _normalize_scene_label(scene: str) -> str:
         scene = str(scene or "").strip()
-        invalid_labels = {"", "??", "unknown", "???", "?????", "none", "null"}
+        invalid_labels = {"", "??", "unknown", "???", "?????", "none", "null", "未知"}
         return "" if scene.lower() in invalid_labels or scene in invalid_labels else scene
 
     @staticmethod
@@ -1131,14 +1140,23 @@ class ScreenCompanion(Star):
 
         return "\n".join(part for part in prompt_parts if part).strip()
 
-    @staticmethod
-    def _extract_screen_assist_prompt(message: str) -> str:
+    def _extract_screen_assist_prompt(self, message: str) -> str:
         import re
 
         text = str(message or "").strip()
         normalized = re.sub(r"\s+", "", text.lower())
         if not normalized or normalized.startswith("/"):
             return ""
+
+        # 提取并忽略bot名称
+        bot_name = getattr(self, "bot_name", "").strip().lower()
+        if bot_name and bot_name in normalized:
+            # 移除bot名称部分
+            normalized = normalized.replace(bot_name, "")
+            # 同时处理原文本，移除bot名称
+            text = re.sub(re.escape(bot_name), "", text, flags=re.IGNORECASE)
+            text = text.strip()
+            normalized = re.sub(r"\s+", "", text.lower())
 
         request_markers = (
             "帮我看看",
@@ -1152,6 +1170,12 @@ class ScreenCompanion(Star):
             "这题怎么做",
             "这个报错",
             "这个页面",
+            "帮我看一下",
+            "你帮我看一下",
+            "帮我看看屏幕",
+            "帮我看下屏幕",
+            "看看屏幕",
+            "看下屏幕",
         )
         context_markers = (
             "屏幕",
@@ -1175,6 +1199,9 @@ class ScreenCompanion(Star):
             "网页",
             "截图",
             "当前",
+            "这个问题",
+            "这个地方",
+            "这里",
         )
         negative_markers = (
             "不用看",
@@ -1590,26 +1617,105 @@ class ScreenCompanion(Star):
         
         logger.info(f"已添加用户偏好: {category} - {preference}")
 
-    def _detect_task_completion(self, scene, active_window):
-        """检测任务是否进入完成态。"""
-        import datetime
-        task_key = f"{scene}_{active_window}"
-        current_time = datetime.datetime.now()
+    def _update_activity(self, scene, active_window):
+        """更新活动状态，记录工作/摸鱼时间。"""
+        import time
+        current_time = time.time()
         
-        if task_key in self.active_tasks:
-            task_info = self.active_tasks[task_key]
-            start_time = task_info["start_time"]
-            duration = (current_time - start_time).total_seconds() / 60  # 杞崲涓哄垎閽?            
-            if duration > 5:
-                del self.active_tasks[task_key]
-                return True, duration
+        # 定义工作和摸鱼场景
+        work_scenes = ["编程", "设计", "办公", "邮件", "浏览-工作"]
+        play_scenes = ["游戏", "视频", "音乐", "社交", "浏览-娱乐"]
         
-        self.active_tasks[task_key] = {
-            "start_time": current_time,
-            "scene": scene,
-            "window": active_window
-        }
-        return False, 0
+        # 确定当前活动类型
+        activity_type = "其他"
+        if scene in work_scenes:
+            activity_type = "工作"
+        elif scene in play_scenes:
+            activity_type = "摸鱼"
+        
+        # 创建活动标识
+        activity = f"{activity_type}:{scene}:{active_window[:50]}"
+        
+        # 如果活动发生变化，记录上一个活动的时间
+        if self.current_activity != activity:
+            if self.current_activity and self.activity_start_time:
+                # 计算上一个活动的持续时间
+                duration = current_time - self.activity_start_time
+                if duration >= 60:  # 只记录超过1分钟的活动
+                    # 解析上一个活动的类型
+                    last_activity_parts = self.current_activity.split(":", 1)
+                    last_activity_type = last_activity_parts[0] if last_activity_parts else "其他"
+                    
+                    # 记录活动历史
+                    self.activity_history.append({
+                        "type": last_activity_type,
+                        "scene": self.current_activity.split(":")[1] if len(self.current_activity.split(":")) > 1 else "",
+                        "window": self.current_activity.split(":")[2] if len(self.current_activity.split(":")) > 2 else "",
+                        "start_time": self.activity_start_time,
+                        "end_time": current_time,
+                        "duration": duration
+                    })
+                    
+                    # 限制活动历史记录数量
+                    if len(self.activity_history) > 1000:
+                        self.activity_history = self.activity_history[-1000:]
+            
+            # 更新当前活动
+            self.current_activity = activity
+            self.activity_start_time = current_time
+        
+        return activity_type
+
+    def _detect_window_changes(self):
+        """检测窗口变化，包括新打开的窗口。"""
+        import time
+        current_time = time.time()
+        
+        # 检查冷却时间
+        if not hasattr(self, 'window_change_cooldown'):
+            self.window_change_cooldown = 0
+        if current_time < self.window_change_cooldown:
+            return False, []
+        
+        # 检查窗口相关属性
+        if not hasattr(self, 'previous_windows'):
+            self.previous_windows = set()
+        if not hasattr(self, 'window_timestamps'):
+            self.window_timestamps = {}
+        
+        # 获取当前打开的窗口
+        current_windows = set(self._list_open_window_titles())
+        current_windows = {w for w in current_windows if w and w.strip()}
+        
+        # 更新窗口时间戳
+        valid_new_windows = []
+        
+        # 处理当前存在的窗口
+        for window in current_windows:
+            if window not in self.window_timestamps:
+                # 记录新窗口的首次出现时间
+                self.window_timestamps[window] = current_time
+            else:
+                # 检查窗口是否持续存在3分钟
+                if current_time - self.window_timestamps[window] >= 180:  # 3分钟 = 180秒
+                    # 窗口持续存在3分钟，标记为有效新窗口
+                    if window not in self.previous_windows:
+                        valid_new_windows.append(window)
+        
+        # 清理已关闭的窗口记录
+        closed_windows = list(self.window_timestamps.keys())
+        for window in closed_windows:
+            if window not in current_windows:
+                del self.window_timestamps[window]
+        
+        # 更新窗口状态
+        if current_windows != self.previous_windows:
+            self.previous_windows = current_windows
+            # 设置冷却时间，避免频繁触发
+            self.window_change_cooldown = current_time + 5  # 5秒冷却
+            return True, valid_new_windows
+        
+        return False, []
 
     def _adjust_interaction_frequency(self, user_response):
         """根据用户回应调整互动频率。"""
@@ -1635,32 +1741,7 @@ class ScreenCompanion(Star):
         self.interaction_frequency = max(1, min(10, 5 + (self.user_engagement - 5) * 0.5))
         logger.info(f"用户参与度: {self.user_engagement}, 互动频率: {self.interaction_frequency}")
 
-    def _add_emotion_words(self, response):
-        """在回复中添加情感词汇和语气词"""
-        import random
-        
-        if random.random() < 0.3:
-            casual_words = self.emotion_words.get("casual", [])
-            if casual_words:
-                casual_word = random.choice(casual_words)
-                response = casual_word + "，" + response
-        
-        # 根据场景添加情感词汇
-        if "编程" in response or "代码" in response:
-            if random.random() < 0.4:
-                encouraging_words = self.emotion_words.get("encouraging", [])
-                if encouraging_words:
-                    encouraging_word = random.choice(encouraging_words)
-                    response = encouraging_word + "，" + response
-        
-        elif "完成" in response or "成功" in response or "解决" in response:
-            if random.random() < 0.4:
-                happy_words = self.emotion_words.get("happy", [])
-                if happy_words:
-                    happy_word = random.choice(happy_words)
-                    response = happy_word + "，" + response
-        
-        return response
+
 
     async def stop(self):
         """Stop the plugin and cancel active tasks."""
@@ -1683,6 +1764,14 @@ class ScreenCompanion(Star):
                 self.state = "inactive"
                 self.enable_mic_monitor = False
                 self.window_companion_active_title = ""
+                
+                # 停止 Web 服务器
+                if self.web_server:
+                    logger.info("正在停止 Web UI 服务器...")
+                    await self.web_server.stop()
+                    self.web_server = None
+                    # 增加延迟时间，确保端口完全释放
+                    await asyncio.sleep(1.0)
                 self.window_companion_active_target = ""
                 self.window_companion_active_rule = {}
 
@@ -1790,6 +1879,16 @@ class ScreenCompanion(Star):
                     base_prompt = persona["prompt"]
         except Exception as e:
             logger.debug(f"获取屏幕尺寸失败: {e}")
+
+        # 检查是否为陪伴模式
+        if self.watch_mode == "陪伴":
+            companion_prompt = getattr(self, 'companion_prompt', None)
+            if companion_prompt:
+                companion_supplemental_guide = (
+                    "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励。"
+                    "营造沉浸式的陪伴体验，让用户感受到持续的支持和关注。"
+                )
+                return f"{companion_prompt.rstrip()}{companion_supplemental_guide}"
 
         if not base_prompt:
             config_prompt = self.system_prompt
@@ -2355,6 +2454,54 @@ class ScreenCompanion(Star):
 
         return screen_result
 
+    def _classify_browser_content(self, window_title: str) -> str:
+        """根据浏览器窗口标题分类内容类型。"""
+        title_lower = window_title.lower()
+        
+        # 工作相关网站关键词
+        work_keywords = [
+            "google", "baidu", "bing", "search", "查询", "搜索",
+            "github", "gitlab", "coding", "stackoverflow", "stackexchange",
+            "docs", "documentation", "wiki", "教程", "guide", "manual",
+            "office", "excel", "word", "powerpoint", "spreadsheet", "document",
+            "gmail", "outlook", "email", "mail", "邮件",
+            "jira", "trello", "asana", "project", "task", "todo",
+            "slack", "teams", "discord", "chat", "沟通", "协作",
+            "figma", "design", "photoshop", "illustrator", "原型", "设计",
+            "analytics", "data", "report", "dashboard", "分析", "报表",
+            "code", "programming", "developer", "dev", "编程", "开发",
+            "cloud", "aws", "azure", "gcp", "cloudflare", "服务器", "云",
+            "crm", "erp", "sap", "salesforce", "客户", "管理",
+            "learning", "course", "education", "学习", "课程", "教育"
+        ]
+        
+        # 娱乐相关网站关键词
+        entertainment_keywords = [
+            "youtube", "bilibili", "netflix", "hulu", "disney+", "视频", "电影", "剧集",
+            "music", "spotify", "apple music", "网易云", "qq音乐", "音乐", "歌曲",
+            "game", "gaming", "游戏", "steam", "epic", "游戏平台",
+            "facebook", "instagram", "twitter", "x", "tiktok", "douyin", "社交", "微博",
+            "news", "新闻", "头条", "资讯",
+            "shopping", "电商", "淘宝", "京东", "拼多多", "购物", "商城",
+            "sports", "体育", "足球", "篮球", "赛事",
+            "entertainment", "娱乐", "明星", "综艺",
+            "anime", "动画", "漫画", "番剧",
+            "porn", "xxx", "色情", "成人"
+        ]
+        
+        # 检查工作相关关键词
+        for keyword in work_keywords:
+            if keyword in title_lower:
+                return "浏览-工作"
+        
+        # 检查娱乐相关关键词
+        for keyword in entertainment_keywords:
+            if keyword in title_lower:
+                return "浏览-娱乐"
+        
+        # 默认返回普通浏览
+        return "浏览"
+
     def _identify_scene(self, window_title: str) -> str:
         """Identify a coarse scene label from the current window title."""
         if not window_title:
@@ -2367,34 +2514,60 @@ class ScreenCompanion(Star):
                 "code", "vscode", "visual studio", "intellij", "pycharm", "idea",
                 "eclipse", "sublime", "atom", "notepad++", "vim", "emacs",
                 "phpstorm", "webstorm", "goland", "rider", "android studio", "xcode",
-                "terminal", "powershell", "cmd",
+                "terminal", "powershell", "cmd", "git", "github", "gitlab", "coding",
             ],
             "设计": [
                 "photoshop", "illustrator", "figma", "sketch", "xd", "gimp", "canva",
+                "photopea", "coreldraw", "blender", "maya", "3d", "design",
             ],
             "浏览": [
                 "chrome", "firefox", "edge", "safari", "opera", "browser", "???",
+                "chrome.exe", "firefox.exe", "edge.exe", "safari.exe", "opera.exe",
             ],
             "办公": [
                 "word", "excel", "powerpoint", "office", "??", "??", "wps", "outlook",
+                "office365", "onenote", "access", "project", "visio",
             ],
             "游戏": [
                 "steam", "epic", "battle.net", "valorant", "csgo", "dota", "minecraft",
-                "game", "??",
+                "game", "league", "lol", "overwatch", "fortnite", "pubg", "apex",
+                "genshin", "roblox", "warcraft", "diablo", "starcraft", "hearthstone",
+                "fifa", "nba", "call of duty", "cod", "assassin's creed", "ac",
+                "grand theft auto", "gta", "the witcher", "cyberpunk", "fallout",
             ],
             "视频": [
                 "youtube", "bilibili", "netflix", "vlc", "potplayer", "movie", "video", "??",
+                "youku", "tudou", "iqiyi", "letv", "mkv", "mp4", "wmv", "avi",
+                "media player", "kmplayer", "mplayer",
             ],
             "阅读": [
                 "novel", "reader", "ebook", "pdf", "reading", "??", "???", "???",
+                "adobe reader", "foxit", "kindle", "ibooks", "epub", "mobi",
             ],
             "音乐": [
                 "spotify", "apple music", "music", "itunes", "?????", "qq??", "musicbee",
+                "网易云", "netease", "kuwo", "kugou", "qq music", "winamp", "foobar",
+            ],
+            "社交": [
+                "discord", "wechat", "qq", "skype", "zoom", "teams", "slack",
+                "whatsapp", "telegram", "signal", "messenger", "facebook", "instagram",
+                "twitter", "x", "linkedin", "tiktok", "douyin",
+            ],
+            "邮件": [
+                "outlook", "gmail", "mail", "thunderbird", "mailchimp", "protonmail",
+                "邮件", "email", "inbox",
+            ],
+            "工具": [
+                "calculator", "notepad", "paint", "snip", "snipping", "screenshot",
+                "explorer", "finder", "file explorer", "task manager", "control panel",
             ],
         }
 
         for scene, keywords in keyword_groups.items():
             if any(keyword in title_lower for keyword in keywords):
+                # 如果是浏览器场景，进一步分类
+                if scene == "浏览":
+                    return self._classify_browser_content(window_title)
                 return scene
 
         return "未知"
@@ -2636,48 +2809,64 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.debug(f"获取对话历史失败: {e}")
 
+            # 构建互动提示词，优化顺序以提高LLM回复速度和连贯性
             interaction_prompt = (
                 f"请根据这次识屏结果，自然地回应用户。"
                 f"\n场景：{scene}"
                 f"\n识别内容：{recognition_text}"
                 "\n优先提炼用户正在做什么、进行到哪一步、哪里值得提醒或建议。"
-                "\n不要机械复述“我看到你在……”，也不要默认给喝水散步之类的泛建议。"
+                "\n不要机械复述'我看到你在……'，也不要默认给喝水散步之类的泛建议。"
             )
-            if custom_prompt:
-                interaction_prompt += f" {custom_prompt}"
-                if debug_mode:
-                    logger.info(f"浣跨敤鑷畾涔夋彁绀鸿瘝: {custom_prompt}")
-            else:
-                if scene_prompt:
-                    interaction_prompt += f" {scene_prompt}"
-                if time_prompt:
-                    interaction_prompt += f" {time_prompt}"
-                if holiday_prompt:
-                    interaction_prompt += f" {holiday_prompt}"
-                if weather_prompt:
-                    interaction_prompt += f" {weather_prompt}"
-                if system_status_prompt:
-                    interaction_prompt += f" {system_status_prompt}"
             
-            if self._is_in_rest_reminder_range():
-                interaction_prompt += "\n只有当任务相关建议不足，且确实出现疲劳迹象时，才轻轻带一句休息提醒。"
-                logger.info(f"[任务 {task_id}] 当前处于休息提醒时间，已附加休息提醒")
+            # 最近的对话历史（放在前面以确保连贯性）
+            if contexts:
+                history_str = "\n最近的对话:\n" + "\n".join(contexts)
+                interaction_prompt += history_str
             
-            # 触发相关记忆
+            # 相关长期记忆（个性化上下文）
             related_memories = self._trigger_related_memories(scene, active_window_title)
             if related_memories:
                 memory_text = "\n相关长期记忆："
-                for memory in related_memories[:5]:
+                for memory in related_memories[:3]:  # 减少记忆数量，只保留最相关的
                     memory_text += f"\n- {memory}"
                 interaction_prompt += memory_text
 
+            # 最近观察记录（上下文）
             if self.observations:
-                recent_observations = self.observations[-self.max_observations:][::-1]
+                recent_observations = self.observations[-3:][::-1]  # 减少观察记录数量
                 observation_text = "\n最近观察记录："
                 for obs in recent_observations:
                     observation_text += f"\n- {obs['timestamp'].split('T')[1][:5]} {obs['scene']}: {obs['description']}"
                 interaction_prompt += observation_text
-
+            
+            # 自定义提示词（特定任务）
+            if custom_prompt:
+                interaction_prompt += f"\n自定义提示：{custom_prompt}"
+                if debug_mode:
+                    logger.info(f"使用自定义提示词: {custom_prompt}")
+            else:
+                # 场景偏好（个性化）
+                if scene_prompt:
+                    interaction_prompt += f"\n场景偏好：{scene_prompt}"
+                # 时间相关提示（上下文）
+                if time_prompt:
+                    interaction_prompt += f"\n时间：{time_prompt}"
+                if holiday_prompt:
+                    interaction_prompt += f"\n节假日：{holiday_prompt}"
+                if weather_prompt:
+                    interaction_prompt += f"\n天气：{weather_prompt}"
+                if system_status_prompt:
+                    interaction_prompt += f"\n系统状态：{system_status_prompt}"
+            
+            # 休息提醒（如果在休息提醒时间）
+            if self._is_in_rest_reminder_range():
+                import datetime
+                interaction_prompt += "\n休息提醒：只有当任务相关建议不足，且确实出现疲劳迹象时，才轻轻带一句休息提醒。"
+                logger.info(f"[任务 {task_id}] 当前处于休息提醒时间，已附加休息提醒")
+                # 更新最后提醒时间，设置冷却
+                self.last_rest_reminder_time = datetime.datetime.now()
+            
+            # 同伴响应指南（格式和风格指导）
             interaction_prompt += "\n\n" + self._build_companion_response_guide(
                 scene=scene,
                 recognition_text=recognition_text,
@@ -2685,22 +2874,14 @@ class ScreenCompanion(Star):
                 context_count=len(contexts),
             )
 
+            # 场景特定建议（针对性指导）
             if scene in ("视频", "阅读"):
                 interaction_prompt += (
                     "\n- 优先接住画面、内容、情绪或观点，不要把自己说成旁白。"
-                )
-                interaction_prompt += (
                     "\n- 如果要给建议，必须和当前内容直接相关。"
                 )
             else:
-                interaction_prompt += (
-                    "\n- 回应要像同伴，不要像系统播报。"
-                )
-
-
-            if contexts:
-                history_str = "\n最近的对话:\n" + "\n".join(contexts)
-                interaction_prompt += history_str
+                interaction_prompt += "\n- 回应要像同伴，不要像系统播报。"
 
             # 添加超时设置，避免 LLM 调用卡住
             try:
@@ -2733,24 +2914,19 @@ class ScreenCompanion(Star):
                 if debug_mode:
                     logger.warning("模型没有返回有效互动回复")
             
-            # 检测任务完成并给予鼓励
-            task_completed, duration = self._detect_task_completion(scene, active_window_title)
-            if task_completed:
-                import random
-                encouraging_words = self.emotion_words.get("encouraging", [])
-                if encouraging_words:
-                    encouraging_word = random.choice(encouraging_words)
-                    response_text = f"{encouraging_word}，这一步看起来已经推进下去了。"
+
             
             if observation_stored:
                 self._update_long_term_memory(scene, active_window_title, 1)  # 假设每次互动持续 1 分钟
             
-            # 在回复中加入情绪词汇和语气词
-            response_text = self._add_emotion_words(response_text)
+
             
             # 添加少量不确定表达
             response_text = self._add_uncertainty(response_text)
 
+            # 更新活动状态，记录工作/摸鱼时间
+            self._update_activity(scene, active_window_title)
+            
             # 清理沉浸感较差的播报式开场，尤其是视频和阅读场景
             response_text = self._polish_response_text(response_text, scene)
             
@@ -3789,24 +3965,28 @@ class ScreenCompanion(Star):
             now = datetime.datetime.now().time()
             start_str, end_str = time_range.split("-")
             start_hour, start_minute = map(int, start_str.split(":"))
-            
-            # 计算休息时间开始前 30 分钟的提醒时刻
-            reminder_hour = start_hour
-            reminder_minute = start_minute - 30
-            if reminder_minute < 0:
-                reminder_hour -= 1
-                reminder_minute += 60
-            if reminder_hour < 0:
-                reminder_hour += 24
-            
-            reminder_time = datetime.time(reminder_hour, reminder_minute)
-            start_time = datetime.time(start_hour, start_minute)
+            end_hour, end_minute = map(int, end_str.split(":"))
 
-            if reminder_time <= start_time:
-                return reminder_time <= now < start_time
+            start_time = datetime.time(start_hour, start_minute)
+            end_time = datetime.time(end_hour, end_minute)
+
+            # 只在休息时间内提醒，不在休息时间前提醒
+            if start_time <= end_time:
+                in_rest_time = start_time <= now <= end_time
             else:
-                # 璺ㄥ崍澶滅殑鎯呭喌
-                return now >= reminder_time or now < start_time
+                # 跨午夜的情况
+                in_rest_time = now >= start_time or now <= end_time
+
+            # 检查冷却时间
+            if in_rest_time:
+                current_time = datetime.datetime.now()
+                last_reminder_time = getattr(self, "last_rest_reminder_time", None)
+                if last_reminder_time:
+                    time_diff = (current_time - last_reminder_time).total_seconds() / 60
+                    if time_diff < 30:
+                        return False
+                return True
+            return False
         except Exception as e:
             logger.error(f"解析休息提醒时间段失败: {e}")
             return False
@@ -4537,15 +4717,6 @@ class ScreenCompanion(Star):
         # 互动频率管理
         self.user_engagement = 5  # 用户参与度，范围 1-10
         self.engagement_history = []  # 记录用户参与度历史
-        # 情绪词汇和语气词
-        self.emotion_words = {
-            "happy": ["真不错", "挺好", "太好了", "舒服", "有意思", "可以呀", "真棒"],
-            "concerned": ["要小心", "得注意", "有点危险", "别急", "稳一点", "多看看"],
-            "curious": ["咦", "有点意思", "我有点好奇", "这是什么路子", "像是在试"],
-            "encouraging": ["继续", "可以的", "稳住", "别慌", "你能搞定"],
-            "casual": ["欸", "诶", "嗯", "哈哈", "行", "好像", "有点"],
-            "surprised": ["啊", "欸？", "哇", "居然", "还真是"],
-        }
 
         self.active_tasks = {}  # 记录用户正在进行的任务
         # 学习反馈系统
@@ -4765,6 +4936,14 @@ class ScreenCompanion(Star):
                         logger.info(f"[任务 {task_id}] 任务状态已变化，停止等待")
                         break
                     try:
+                        # 检测窗口变化
+                        if elapsed % 3 == 0:  # 每3秒检测一次窗口变化
+                            window_changed, new_windows = self._detect_window_changes()
+                            if window_changed and new_windows:
+                                logger.info(f"[任务 {task_id}] 检测到新打开的窗口: {new_windows}")
+                                # 可以在这里添加对新窗口的处理逻辑
+                                # 例如：发送通知、自动开始陪伴等
+                        
                         if elapsed > 0 and elapsed % 10 == 0 and interval is None:
                             new_check_interval, new_probability = self._get_current_preset_params()
                             if new_check_interval != check_interval:
@@ -4907,7 +5086,7 @@ class ScreenCompanion(Star):
                                 custom_prompt=custom_prompt,
                                 task_id=task_id,
                             ),
-                            timeout=240.0,  # 增加超时时间到 240 秒，兼容视觉 API 和 LLM 调用
+                            timeout=360.0,  # 增加超时时间到 360 秒，兼容视觉 API 和 LLM 调用
                         )
 
                         # 检查任务是否已停止

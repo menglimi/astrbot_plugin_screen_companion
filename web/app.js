@@ -23,6 +23,7 @@ const state = {
     activeSettingsGroup: "persona",
     settingsSearch: "",
     windowCandidates: [],
+    activityStats: null,
 };
 
 const elements = {
@@ -60,6 +61,9 @@ const elements = {
     loginForm: document.getElementById("loginForm"),
     loginPassword: document.getElementById("loginPassword"),
     loginError: document.getElementById("loginError"),
+    todayActivityStats: document.getElementById("todayActivityStats"),
+    totalActivityStats: document.getElementById("totalActivityStats"),
+    recentActivities: document.getElementById("recentActivities"),
     runtimeMeta: document.getElementById("runtimeMeta"),
     runtimeStats: document.getElementById("runtimeStats"),
     runtimeInsights: document.getElementById("runtimeInsights"),
@@ -962,6 +966,7 @@ function renderObservationList() {
         const tags = [
             observation.scene ? `<span class="tag">${escapeHtml(observation.scene)}</span>` : "",
             observation.active_window ? `<span class="tag">${escapeHtml(observation.active_window)}</span>` : "",
+            observation.time_period ? `<span class="tag">${escapeHtml(observation.time_period)}</span>` : "",
         ].filter(Boolean).join("");
 
         card.innerHTML = `
@@ -1223,6 +1228,91 @@ async function loadMemories() {
     renderMemories();
 }
 
+async function loadActivityStats() {
+    renderLoading(elements.todayActivityStats, "正在加载活动统计...");
+    renderLoading(elements.totalActivityStats, "正在加载活动统计...");
+    renderLoading(elements.recentActivities, "正在加载活动统计...");
+    try {
+        const data = await apiFetch("/api/activity");
+        state.activityStats = data;
+        renderActivityStats();
+    } catch (error) {
+        console.error("加载活动统计失败:", error);
+        elements.todayActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
+        elements.totalActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
+        elements.recentActivities.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
+    }
+}
+
+function renderActivityStats() {
+    if (!state.activityStats) return;
+    
+    const today = state.activityStats.today || {};
+    const total = state.activityStats.total || {};
+    const recentActivities = state.activityStats.recent_activities || [];
+    
+    // 渲染今日统计
+    elements.todayActivityStats.innerHTML = `
+        <div class="activity-stat-item">
+            <span class="panel-label">工作时间</span>
+            <strong>${today.work_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">摸鱼时间</span>
+            <strong>${today.play_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">其他时间</span>
+            <strong>${today.other_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">总时间</span>
+            <strong>${today.total_time || "0分0秒"}</strong>
+        </div>
+    `;
+    
+    // 渲染总计统计
+    elements.totalActivityStats.innerHTML = `
+        <div class="activity-stat-item">
+            <span class="panel-label">工作时间</span>
+            <strong>${total.work_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">摸鱼时间</span>
+            <strong>${total.play_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">其他时间</span>
+            <strong>${total.other_time || "0分0秒"}</strong>
+        </div>
+        <div class="activity-stat-item">
+            <span class="panel-label">总时间</span>
+            <strong>${total.total_time || "0分0秒"}</strong>
+        </div>
+    `;
+    
+    // 渲染最近活动
+    if (recentActivities.length === 0) {
+        elements.recentActivities.innerHTML = "<div class='empty-state'><strong>暂无活动记录</strong><p>开始使用插件后，这里会显示您的活动记录</p></div>";
+        return;
+    }
+    
+    elements.recentActivities.innerHTML = recentActivities.map(activity => `
+        <article class="observation-card">
+            <div class="observation-header">
+                <div>
+                    <h3 class="list-item-title">${escapeHtml(activity.type)} - ${escapeHtml(activity.scene)}</h3>
+                    <div class="observation-tags">
+                        <span class="tag">${escapeHtml(activity.window)}</span>
+                        <span class="tag">${escapeHtml(activity.duration)}</span>
+                    </div>
+                </div>
+            </div>
+            <p class="observation-content">${escapeHtml(activity.start_time)} - ${escapeHtml(activity.end_time)}</p>
+        </article>
+    `).join("");
+}
+
 async function refreshActiveSection() {
     await loadConfig();
     await loadRuntime();
@@ -1232,6 +1322,7 @@ async function refreshActiveSection() {
     await loadObservationScenes();
     await loadObservations();
     await loadMemories();
+    await loadActivityStats();
     updateSummaryCards();
 }
 

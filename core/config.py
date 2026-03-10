@@ -30,7 +30,8 @@ class PluginConfig(BaseModel):
     # === 自定义预设配置 ===
     custom_presets: str = ""  # 格式: 预设1名称|间隔|概率,预设2名称|间隔|概率
     current_preset_index: int = 0  # 当前使用的预设索引
-    watch_mode: str = "偷看"
+    watch_mode: str = "偷看"  # 可选值: 偷看, 陪伴
+    companion_prompt: str = "你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励，营造沉浸式的陪伴体验。"
     capture_mode: str = "fullscreen"
     bot_vision_quality: int = 85
     image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"

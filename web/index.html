@@ -65,6 +65,7 @@
             <a href="#diaries" class="nav-link active" data-section="diaries">今日日记</a>
             <a href="#observations" class="nav-link" data-section="observations">观察记录</a>
             <a href="#memories" class="nav-link" data-section="memories">长期记忆</a>
+            <a href="#activity" class="nav-link" data-section="activity">活动统计</a>
         </nav>
 
         <main class="content-stack">
@@ -294,6 +295,37 @@
                 </div>
                 <div class="memory-highlights" id="memoryHighlights"></div>
                 <div class="memory-groups" id="memoryGroups"></div>
+            </section>
+            <section id="activity" class="section">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Activity Statistics</p>
+                        <h2>活动统计</h2>
+                    </div>
+                </div>
+                <div class="activity-grid">
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>今日统计</h3>
+                            <span class="panel-subtle">今天的工作和摸鱼时间</span>
+                        </div>
+                        <div class="activity-stats" id="todayActivityStats"></div>
+                    </article>
+                    <article class="panel">
+                        <div class="panel-header">
+                            <h3>总计统计</h3>
+                            <span class="panel-subtle">所有记录的工作和摸鱼时间</span>
+                        </div>
+                        <div class="activity-stats" id="totalActivityStats"></div>
+                    </article>
+                </div>
+                <article class="panel">
+                    <div class="panel-header">
+                        <h3>最近活动</h3>
+                        <span class="panel-subtle">最近10条活动记录</span>
+                    </div>
+                    <div class="list-stack" id="recentActivities"></div>
+                </article>
             </section>
         </main>
     </div>

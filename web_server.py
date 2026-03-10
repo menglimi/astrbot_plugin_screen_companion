@@ -69,12 +69,13 @@ class WebServer:
             body.update(data)
         if kwargs:
             body.update(kwargs)
-        return web.json_response(body)
+        # 确保JSON响应使用UTF-8编码
+        return web.json_response(body, charset='utf-8')
 
     @staticmethod
     def _err(msg: str, status: int = 500) -> web.Response:
         """Return an error JSON response."""
-        return web.json_response({"success": False, "error": msg}, status=status)
+        return web.json_response({"success": False, "error": msg}, status=status, charset='utf-8')
 
     # === 中间件 ====
 
@@ -218,6 +219,7 @@ class WebServer:
         self.app.router.add_post("/api/runtime/config", self.handle_update_runtime_config)
         self.app.router.add_post("/api/runtime/stop", self.handle_stop_runtime_tasks)
         self.app.router.add_get("/api/windows", self.handle_list_windows)
+        self.app.router.add_get("/api/activity", self.handle_get_activity_stats)
         
         # 外部图片分析API
         self.app.router.add_post("/api/analyze", self.handle_analyze_image)
@@ -331,10 +333,24 @@ class WebServer:
                     content = await asyncio.to_thread(
                         abs_path.read_text, encoding="utf-8"
                     )
+                    # 添加字符集信息，确保中文正常显示
+                    if content_type.startswith("text/"):
+                        content_type = f"{content_type}; charset=utf-8"
                     return web.Response(text=content, content_type=content_type)
                 except UnicodeDecodeError:
-                    # 如果不是 UTF-8，尝试二进制
-                    pass
+                    # 如果不是 UTF-8，尝试使用系统默认编码
+                    try:
+                        import locale
+                        default_encoding = locale.getpreferredencoding(False)
+                        content = await asyncio.to_thread(
+                            abs_path.read_text, encoding=default_encoding
+                        )
+                        if content_type.startswith("text/"):
+                            content_type = f"{content_type}; charset={default_encoding}"
+                        return web.Response(text=content, content_type=content_type)
+                    except Exception:
+                        # 如果还是失败，尝试二进制
+                        pass
 
             content = await asyncio.to_thread(abs_path.read_bytes)
             return web.Response(body=content, content_type=content_type)
@@ -362,7 +378,18 @@ class WebServer:
                     self.runner = web.AppRunner(self.app, access_log=None)
                     await self.runner.setup()
 
-                    self.site = web.TCPSite(self.runner, str(self.host), current_port)
+                    # 创建socket并设置端口复用选项
+                    import socket
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    # 设置SO_REUSEADDR和SO_REUSEPORT选项
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    if hasattr(socket, 'SO_REUSEPORT'):
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    # 绑定端口
+                    sock.bind((str(self.host), current_port))
+                    
+                    # 使用自定义socket创建TCPSite
+                    self.site = web.TCPSite(self.runner, sock=sock)
                     await self.site.start()
 
                     self._started = True
@@ -539,6 +566,25 @@ class WebServer:
                     or ""
                 ).strip()
 
+                # 计算时间段
+                time_period = ""
+                timestamp = obs.get('timestamp', '')
+                if timestamp:
+                    try:
+                        # 解析ISO格式的时间戳
+                        if 'T' in timestamp:
+                            hour = int(timestamp.split('T')[1].split(':')[0])
+                            if 0 <= hour < 6:
+                                time_period = "凌晨"
+                            elif 6 <= hour < 12:
+                                time_period = "上午"
+                            elif 12 <= hour < 18:
+                                time_period = "下午"
+                            else:
+                                time_period = "晚上"
+                    except Exception:
+                        pass
+
                 observations.append(
                     {
                         "index": index,
@@ -546,6 +592,7 @@ class WebServer:
                         "scene": scene,
                         "active_window": active_window,
                         "content": content,
+                        "time_period": time_period,
                     }
                 )
             
@@ -712,6 +759,7 @@ class WebServer:
                 "fields": [
                     "bot_name",
                     "system_prompt",
+                    "companion_prompt",
                     "user_preferences",
                     "enable_natural_language_screen_assist",
                     "start_end_mode",
@@ -1050,6 +1098,77 @@ class WebServer:
             return self._ok({"windows": titles, "count": len(titles)})
         except Exception as e:
             logger.error(f"读取窗口列表失败: {e}")
+            return self._err(str(e))
+
+    async def handle_get_activity_stats(self, request):
+        """Get activity statistics (work vs play time)."""
+        try:
+            import time
+            current_time = time.time()
+            
+            # 获取活动历史
+            activity_history = getattr(self.plugin, "activity_history", [])
+            
+            # 计算今天的开始时间
+            today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+            
+            # 统计今天的工作和摸鱼时间
+            today_work_time = 0
+            today_play_time = 0
+            today_other_time = 0
+            
+            for activity in activity_history:
+                if activity.get("start_time", 0) >= today_start:
+                    duration = activity.get("duration", 0)
+                    activity_type = activity.get("type", "其他")
+                    if activity_type == "工作":
+                        today_work_time += duration
+                    elif activity_type == "摸鱼":
+                        today_play_time += duration
+                    else:
+                        today_other_time += duration
+            
+            # 统计总时间
+            total_work_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") == "工作")
+            total_play_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") == "摸鱼")
+            total_other_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") != "工作" and activity.get("type") != "摸鱼")
+            
+            # 获取最近的活动
+            recent_activities = sorted(activity_history, key=lambda x: x.get("start_time", 0), reverse=True)[:10]
+            
+            # 格式化活动数据
+            formatted_activities = []
+            for activity in recent_activities:
+                start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(activity.get("start_time", 0)))
+                end_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(activity.get("end_time", 0)))
+                duration = activity.get("duration", 0)
+                formatted_activities.append({
+                    "type": activity.get("type", "其他"),
+                    "scene": activity.get("scene", ""),
+                    "window": activity.get("window", ""),
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration": f"{int(duration // 60)}分{int(duration % 60)}秒"
+                })
+            
+            return self._ok({
+                "today": {
+                    "work_time": f"{int(today_work_time // 60)}分{int(today_work_time % 60)}秒",
+                    "play_time": f"{int(today_play_time // 60)}分{int(today_play_time % 60)}秒",
+                    "other_time": f"{int(today_other_time // 60)}分{int(today_other_time % 60)}秒",
+                    "total_time": f"{int((today_work_time + today_play_time + today_other_time) // 60)}分{int((today_work_time + today_play_time + today_other_time) % 60)}秒"
+                },
+                "total": {
+                    "work_time": f"{int(total_work_time // 60)}分{int(total_work_time % 60)}秒",
+                    "play_time": f"{int(total_play_time // 60)}分{int(total_play_time % 60)}秒",
+                    "other_time": f"{int(total_other_time // 60)}分{int(total_other_time % 60)}秒",
+                    "total_time": f"{int((total_work_time + total_play_time + total_other_time) // 60)}分{int((total_work_time + total_play_time + total_other_time) % 60)}秒"
+                },
+                "recent_activities": formatted_activities,
+                "activity_count": len(activity_history)
+            })
+        except Exception as e:
+            logger.error(f"Error getting activity stats: {e}")
             return self._err(str(e))
 
     async def handle_update_runtime_config(self, request):
