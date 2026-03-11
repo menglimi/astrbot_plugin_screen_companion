@@ -86,28 +86,20 @@
       "enabled": true
     }
   },
-  "watch_mode": {
-    "description": "观察模式",
-    "type": "string",
-    "hint": "选择'观看'模式（正常观察）或'偷看'模式（偷偷瞄了一眼）。",
-    "default": "偷看",
-    "enum": [
-      "观看",
-      "偷看"
-    ],
+  "use_companion_mode": {
+    "description": "使用陪伴模式",
+    "type": "bool",
+    "hint": "开启后使用陪伴模式（持续陪伴），关闭则使用偷看模式（偶尔观察）。",
+    "default": false,
     "condition": {
       "enabled": true
     }
   },
-  "capture_mode": {
-    "description": "截图区域",
-    "type": "string",
-    "hint": "选择截取全屏还是活动窗口（注：部分系统环境下活动窗口模式可能失效）。",
-    "default": "fullscreen",
-    "enum": [
-      "fullscreen",
-      "active_window"
-    ],
+  "capture_active_window": {
+    "description": "只截取活动窗口",
+    "type": "bool",
+    "hint": "开启后只截取活动窗口，关闭则截取全屏（注：部分系统环境下活动窗口模式可能失效）。",
+    "default": false,
     "condition": {
       "enabled": true
     }
@@ -214,12 +206,11 @@
       "enabled": true
     }
   },
-  "start_end_mode": {
-    "description": "开始/结束回复模式",
-    "type": "string",
-    "hint": "选择使用预设回复还是 LLM 生成回复",
-    "default": "llm",
-    "enum": ["preset", "llm"],
+  "use_llm_for_start_end": {
+    "description": "使用 LLM 回复开始和结束消息",
+    "type": "bool",
+    "hint": "开启后使用 LLM 生成开始和结束消息，关闭则使用预设回复。",
+    "default": true,
     "condition": {
       "enabled": true
     }
@@ -227,45 +218,45 @@
   "start_preset": {
     "description": "开始预设回复",
     "type": "string",
-    "hint": "使用预设模式时的开始回复内容",
+    "hint": "不使用 LLM 时的开始回复内容",
     "default": "知道啦~我会时不时过来看一眼的",
     "condition": {
       "enabled": true,
-      "start_end_mode": "preset"
+      "use_llm_for_start_end": false
     }
   },
   "end_preset": {
     "description": "结束预设回复",
     "type": "string",
-    "hint": "使用预设模式时的结束回复内容",
+    "hint": "不使用 LLM 时的结束回复内容",
     "default": "好啦，我不看了～下次再陪你玩！",
     "condition": {
       "enabled": true,
-      "start_end_mode": "preset"
+      "use_llm_for_start_end": false
     }
   },
   "start_llm_prompt": {
     "description": "开始 LLM 提示词",
     "type": "text",
-    "hint": "使用 LLM 模式时的开始回复提示词",
+    "hint": "使用 LLM 时的开始回复提示词",
     "default": "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
       "enabled": true,
-      "start_end_mode": "llm"
+      "use_llm_for_start_end": true
     }
   },
   "end_llm_prompt": {
     "description": "结束 LLM 提示词",
     "type": "text",
-    "hint": "使用 LLM 模式时的结束回复提示词",
+    "hint": "使用 LLM 时的结束回复提示词",
     "default": "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
       "enabled": true,
-      "start_end_mode": "llm"
+      "use_llm_for_start_end": true
     }
   },
   "enable_diary": {
@@ -494,6 +485,15 @@
       "enable_learning": true
     }
   },
+  "bot_appearance": {
+    "description": "Bot 外形描述",
+    "type": "text",
+    "hint": "描述 Bot 的外形特征，用于在屏幕中识别自己。例如：一个蓝色头发的动漫女孩，穿着白色连衣裙，头上有猫耳。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
   "interaction_kpi": {
     "description": "快捷切换配置",
     "type": "int",
@@ -527,7 +527,7 @@
         "description": "Web UI 端口",
         "type": "int",
         "hint": "Web UI 服务器监听的端口",
-        "default": 8898
+        "default": 6314
       },
       "auth_enabled": {
         "description": "启用 Web UI 认证",

@@ -1,5 +1,23 @@
 # 屏幕伴侣插件更新日志
 
+## 2.5.2 (2026-03-11)
+
+### 新增
+- 实现了错误纠正和持续性记忆功能
+- 实现了自我形象识别和记忆
+- 实现了 `webui` 命令来返回端口信息
+
+### 修复
+- 修复了 "TCPSite.__init__() got an unexpected keyword argument 'sock'" 错误
+- 修复了 "charset must not be in content_type argument" 错误
+- 修复了 "json_response() got an unexpected keyword argument 'charset'" 错误
+- 修复了 WebUI 中的中文乱码问题
+
+### 优化
+- 优化了 `_build_vision_prompt` 方法，按重要性排序组织提示词，以降低 LLM 反应时间
+- 更新了默认端口从 8898 到 6314
+- 减少了自动切换端口的次数从 10 到 3
+
 ## 2.5.1 (2026-03-11)
 
 ### 修复

@@ -17,10 +17,10 @@ class WebServer:
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
-    START_RETRY_COUNT = 10
+    START_RETRY_COUNT = 3
     START_RETRY_DELAY = 0.5
 
-    def __init__(self, plugin: Any, host: str = "0.0.0.0", port: int = 8898):
+    def __init__(self, plugin: Any, host: str = "0.0.0.0", port: int = 6314):
         self.plugin = plugin
         self.host: str = host
         self.port: int = self._normalize_port(port)
@@ -50,11 +50,11 @@ class WebServer:
         try:
             normalized = int(port)
         except Exception:
-            normalized = 8898
+            normalized = 6314
 
         if normalized < 1 or normalized > 65535:
-            logger.warning(f"WebUI 端口 {port} 不在有效范围内，已回退到 8898")
-            return 8898
+            logger.warning(f"WebUI 端口 {port} 不在有效范围内，已回退到 6314")
+            return 6314
         elif normalized < 1024:
             logger.warning(f"WebUI 端口 {port} 是系统保留端口，可能需要管理员权限")
         return normalized
@@ -69,13 +69,13 @@ class WebServer:
             body.update(data)
         if kwargs:
             body.update(kwargs)
-        # 确保JSON响应使用UTF-8编码
-        return web.json_response(body, charset='utf-8')
+        # JSON响应默认使用UTF-8编码
+        return web.json_response(body)
 
     @staticmethod
     def _err(msg: str, status: int = 500) -> web.Response:
         """Return an error JSON response."""
-        return web.json_response({"success": False, "error": msg}, status=status, charset='utf-8')
+        return web.json_response({"success": False, "error": msg}, status=status)
 
     # === 中间件 ====
 
@@ -89,7 +89,7 @@ class WebServer:
                 logger.error(f"Unhandled WebUI error: {e}", exc_info=True)
                 if (request.path or "").startswith("/api/"):
                     return WebServer._err("Internal Server Error")
-                return web.Response(text="500 Internal Server Error", status=500)
+                return web.Response(text="500 Internal Server Error", content_type="text/plain", charset="utf-8", status=500)
 
         return middleware_handler
 
@@ -334,9 +334,10 @@ class WebServer:
                         abs_path.read_text, encoding="utf-8"
                     )
                     # 添加字符集信息，确保中文正常显示
-                    if content_type.startswith("text/"):
-                        content_type = f"{content_type}; charset=utf-8"
-                    return web.Response(text=content, content_type=content_type)
+                    charset = None
+                    if content_type.startswith("text/") or content_type in ("application/javascript", "application/json", "application/xml"):
+                        charset = "utf-8"
+                    return web.Response(text=content, content_type=content_type, charset=charset)
                 except UnicodeDecodeError:
                     # 如果不是 UTF-8，尝试使用系统默认编码
                     try:
@@ -345,9 +346,10 @@ class WebServer:
                         content = await asyncio.to_thread(
                             abs_path.read_text, encoding=default_encoding
                         )
-                        if content_type.startswith("text/"):
-                            content_type = f"{content_type}; charset={default_encoding}"
-                        return web.Response(text=content, content_type=content_type)
+                        charset = None
+                        if content_type.startswith("text/") or content_type in ("application/javascript", "application/json", "application/xml"):
+                            charset = default_encoding
+                        return web.Response(text=content, content_type=content_type, charset=charset)
                     except Exception:
                         # 如果还是失败，尝试二进制
                         pass
@@ -365,7 +367,7 @@ class WebServer:
             logger.warning(f"WebUI static directory not found: {self.static_dir}")
 
         base_port = self.port
-        for port_attempt in range(0, 10):  # 尝试10个连续端口
+        for port_attempt in range(0, 3):  # 尝试3个连续端口
             current_port = base_port + port_attempt
             if current_port > 65535:
                 break
@@ -378,22 +380,26 @@ class WebServer:
                     self.runner = web.AppRunner(self.app, access_log=None)
                     await self.runner.setup()
 
-                    # 创建socket并设置端口复用选项
-                    import socket
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    # 设置SO_REUSEADDR和SO_REUSEPORT选项
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    if hasattr(socket, 'SO_REUSEPORT'):
-                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-                    # 绑定端口
-                    sock.bind((str(self.host), current_port))
-                    
-                    # 使用自定义socket创建TCPSite
-                    self.site = web.TCPSite(self.runner, sock=sock)
+                    # 直接使用 host 和 port 创建 TCPSite
+                    # aiohttp 会自动处理 socket 的创建和绑定
+                    self.site = web.TCPSite(self.runner, str(self.host), current_port)
                     await self.site.start()
 
                     self._started = True
+                    old_port = self.port
                     self.port = current_port  # 更新实际使用的端口
+                    
+                    # 如果端口发生变化，尝试回写到插件配置
+                    if old_port != current_port:
+                        try:
+                            if hasattr(self.plugin, 'plugin_config') and hasattr(self.plugin.plugin_config, 'webui'):
+                                self.plugin.plugin_config.webui.port = current_port
+                                if hasattr(self.plugin.plugin_config, 'save_webui_config'):
+                                    self.plugin.plugin_config.save_webui_config()
+                                logger.info(f"WebUI 端口已更新为: {current_port}")
+                        except Exception as e:
+                            logger.debug(f"更新 WebUI 端口配置失败: {e}")
+                    
                     protocol = "http"
                     if self.host == "0.0.0.0":
                         logger.info(
@@ -477,6 +483,7 @@ class WebServer:
                 return web.Response(
                     text="<h1>Screen Companion WebUI</h1><p>index.html not found</p>",
                     content_type="text/html",
+                    charset="utf-8",
                     status=404,
                 )
             # Avoid FileResponse edge cases by reading the file manually
@@ -491,10 +498,10 @@ class WebServer:
                 logger.warning(
                     "WebUI index.html is not valid UTF-8, returned with replacement characters.",
                 )
-            return web.Response(text=content, content_type="text/html", status=200)
+            return web.Response(text=content, content_type="text/html", charset="utf-8", status=200)
         except Exception as e:
             logger.error(f"Error serving index.html: {e}")
-            return web.Response(text=f"Error: {e}", status=500)
+            return web.Response(text=f"Error: {e}", content_type="text/plain", charset="utf-8", status=500)
 
     async def handle_list_diaries(self, request):
         """List available diary files."""
@@ -707,8 +714,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.5.0",
-                "plugin_version": "2.5.0"
+                "version": "2.5.2",
+                "plugin_version": "2.5.2"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -743,7 +750,7 @@ class WebServer:
                 {
                     "webui.enabled": bool(getattr(webui_config, "enabled", False)),
                     "webui.host": getattr(webui_config, "host", "0.0.0.0"),
-                    "webui.port": int(getattr(webui_config, "port", 8898) or 8898),
+                    "webui.port": int(getattr(webui_config, "port", 6314) or 6314),
                     "webui.auth_enabled": bool(getattr(webui_config, "auth_enabled", True)),
                     "webui.password": getattr(webui_config, "password", ""),
                     "webui.session_timeout": int(getattr(webui_config, "session_timeout", 3600) or 3600),
@@ -762,7 +769,7 @@ class WebServer:
                     "companion_prompt",
                     "user_preferences",
                     "enable_natural_language_screen_assist",
-                    "start_end_mode",
+                    "use_llm_for_start_end",
                     "start_preset",
                     "end_preset",
                     "start_llm_prompt",
@@ -783,8 +790,8 @@ class WebServer:
                     "rest_time_range",
                     "custom_presets",
                     "current_preset_index",
-                    "watch_mode",
-                    "capture_mode",
+                    "use_companion_mode",
+                    "capture_active_window",
                     "enable_window_companion",
                     "window_companion_targets",
                     "window_companion_check_interval",
@@ -871,8 +878,8 @@ class WebServer:
             "webui.port": {
                 "description": "WebUI 端口",
                 "type": "int",
-                "hint": "默认 8898，修改后需要按新端口访问 WebUI。",
-                "default": 8898,
+                "hint": "默认 6314，修改后需要按新端口访问 WebUI。",
+                "default": 6314,
                 "min": 1024,
                 "max": 65535,
             },
@@ -1024,8 +1031,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-                "version": "2.5.0",
-                "plugin_version": "2.5.0",
+                "version": "2.5.2",
+                "plugin_version": "2.5.2",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),

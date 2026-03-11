@@ -27,7 +27,7 @@ from .core.config import PluginConfig
 
 
 class ScreenCompanion(Star):
-    DEFAULT_WEBUI_PORT = 8898
+    DEFAULT_WEBUI_PORT = 6314
 
     def __init__(self, context: Context, config: dict):
         import os
@@ -171,9 +171,9 @@ class ScreenCompanion(Star):
         self.check_interval = self.plugin_config.check_interval
         self.trigger_probability = self.plugin_config.trigger_probability
         self.active_time_range = self.plugin_config.active_time_range
-        self.watch_mode = self.plugin_config.watch_mode
-        self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励，营造沉浸式的陪伴体验。')
-        self.capture_mode = self.plugin_config.capture_mode
+        self.use_companion_mode = self.plugin_config.use_companion_mode
+        self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。')
+        self.capture_active_window = self.plugin_config.capture_active_window
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
         self.image_prompt = self.plugin_config.image_prompt
         self.use_external_vision = self.plugin_config.use_external_vision
@@ -185,7 +185,7 @@ class ScreenCompanion(Star):
         self.vision_api_key_backup = getattr(self.plugin_config, 'vision_api_key_backup', None)
         self.vision_api_model_backup = getattr(self.plugin_config, 'vision_api_model_backup', None)
         self.user_preferences = self.plugin_config.user_preferences
-        self.start_end_mode = self.plugin_config.start_end_mode
+        self.use_llm_for_start_end = self.plugin_config.use_llm_for_start_end
         self.start_preset = self.plugin_config.start_preset
         self.end_preset = self.plugin_config.end_preset
         self.start_llm_prompt = self.plugin_config.start_llm_prompt
@@ -235,6 +235,7 @@ class ScreenCompanion(Star):
         self.interaction_frequency = self.plugin_config.interaction_frequency
         self.image_quality = self.plugin_config.image_quality
         self.system_prompt = self.plugin_config.system_prompt
+        self.bot_appearance = self.plugin_config.bot_appearance
 
         # 同步 WebUI 配置
         self.webui_enabled = self.plugin_config.webui.enabled
@@ -415,11 +416,9 @@ class ScreenCompanion(Star):
             f"这是你被指定要陪伴的窗口：《{window_title}》。",
             "请更关注这个窗口里的当前任务、卡点和下一步，不要泛泛播报画面。",
             "如果适合给建议，优先给和当前任务直接相关、能立刻派上用场的建议。",
-            "保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励。",
-            "营造沉浸式的陪伴体验，让用户感受到持续的支持和关注。",
+            "保持对话的连续性，关注用户的任务进展，提供具体的建议。",
             "注意观察窗口内容的变化，及时调整你的回应，确保与当前场景相关。",
             "如果发现用户遇到困难，提供具体的解决方案和步骤指导。",
-            "在适当的时候给予鼓励和肯定，增强用户的信心和动力。",
         ]
         if extra_prompt:
             pieces.append(extra_prompt.strip())
@@ -588,25 +587,47 @@ class ScreenCompanion(Star):
 
         async with webui_lock:
             logger.info("检测到 WebUI 配置变更，正在重启 WebUI...")
-            if self.web_server:
-                await self.web_server.stop()
-                self.web_server = None
-                await asyncio.sleep(0.6)
 
             if not self.webui_enabled:
+                # WebUI 已禁用，停止旧服务即可
+                if self.web_server:
+                    await self.web_server.stop()
+                    self.web_server = None
+                    await asyncio.sleep(0.6)
                 return
 
+            # 保存旧服务引用，在新服务启动成功后再停止
+            old_server = self.web_server
+
             try:
-                self.web_server = WebServer(self, host=self.webui_host, port=self.webui_port)
-                success = await self.web_server.start()
-                if not success:
+                new_server = WebServer(self, host=self.webui_host, port=self.webui_port)
+                success = await new_server.start()
+                if success:
+                    # 新服务启动成功，更新引用并停止旧服务
+                    self.web_server = new_server
+                    if old_server:
+                        try:
+                            await old_server.stop()
+                            await asyncio.sleep(0.6)
+                        except Exception as e:
+                            logger.warning(f"停止旧 WebUI 服务时出错: {e}")
+                    logger.info("WebUI 重启成功")
+                else:
                     self.web_server = None
                     logger.error(
                         f"WebUI 重启失败，原因: 无法绑定 {self.webui_host}:{self.webui_port}"
                     )
+                    # 启动失败，恢复旧服务引用
+                    if old_server and self.web_server != old_server:
+                        self.web_server = old_server
+                        logger.info("已恢复旧的 WebUI 服务")
             except Exception as e:
                 self.web_server = None
                 logger.error(f"重启 WebUI 失败: {e}")
+                # 启动失败，恢复旧服务引用
+                if old_server and self.web_server != old_server:
+                    self.web_server = old_server
+                    logger.info("已恢复旧的 WebUI 服务")
 
     def _apply_plugin_config_updates(self, config_dict: dict) -> None:
         """将配置字典写回插件配置对象。"""
@@ -710,7 +731,8 @@ class ScreenCompanion(Star):
                 with open(observations_file, "r", encoding="utf-8") as f:
                     self.observations = json.load(f)
                     if len(self.observations) > self.max_observations:
-                        self.observations = self.observations[-self.max_observations:]
+                        # 每次达到上限时删除5条，保留15条
+                        self.observations = self.observations[-15:]
         except Exception as e:
             logger.error(f"加载观察记录失败: {e}")
             self.observations = []
@@ -722,11 +744,67 @@ class ScreenCompanion(Star):
             import os
             observations_file = os.path.join(self.observation_storage, "observations.json")
             if len(self.observations) > self.max_observations:
-                self.observations = self.observations[-self.max_observations:]
+                # 每次达到上限时删除5条，保留15条
+                self.observations = self.observations[-15:]
+            # 整理和补正未知观察记录
+            self._cleanup_unknown_observations()
             with open(observations_file, "w", encoding="utf-8") as f:
                 json.dump(self.observations, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存观察记录失败: {e}")
+
+    def _cleanup_unknown_observations(self):
+        """整理和补正观察记录中的"未知"场景。"""
+        if not self.observations:
+            return
+        
+        # 统计未知场景的数量
+        unknown_count = sum(1 for obs in self.observations if obs.get("scene", "") == "未知")
+        
+        # 如果未知场景数量较多，进行整理
+        if unknown_count > 5:
+            logger.info(f"开始整理未知观察记录，共 {unknown_count} 条")
+            
+            # 遍历观察记录，尝试补正未知场景
+            for obs in self.observations:
+                if obs.get("scene", "") == "未知":
+                    # 尝试根据窗口标题和描述补正场景
+                    window_title = obs.get("window_title", "")
+                    description = obs.get("description", "")
+                    
+                    # 首先尝试根据窗口标题识别场景
+                    if window_title:
+                        scene = self._identify_scene(window_title)
+                        if scene != "未知":
+                            obs["scene"] = scene
+                            logger.info(f"已补正场景: {window_title} -> {scene}")
+                            continue
+                    
+                    # 如果窗口标题识别失败，尝试根据描述识别场景
+                    if description:
+                        # 简单的描述匹配
+                        description_lower = description.lower()
+                        scene_keywords = {
+                            "编程": ["code", "program", "开发", "编程", "debug", "代码"],
+                            "设计": ["design", "设计", "美术", "绘图", "创意"],
+                            "办公": ["document", "excel", "word", "办公", "工作"],
+                            "游戏": ["game", "游戏", "play", "玩家", "关卡"],
+                            "视频": ["video", "电影", "视频", "播放", "tv"],
+                            "阅读": ["read", "book", "阅读", "书籍", "文档"],
+                            "音乐": ["music", "歌曲", "音乐", "audio"],
+                            "社交": ["chat", "社交", "聊天", "message"],
+                        }
+                        
+                        for scene, keywords in scene_keywords.items():
+                            if any(keyword in description_lower for keyword in keywords):
+                                obs["scene"] = scene
+                                logger.info(f"已根据描述补正场景: {description[:50]} -> {scene}")
+                                break
+        
+        # 清理后再次统计未知场景数量
+        new_unknown_count = sum(1 for obs in self.observations if obs.get("scene", "") == "未知")
+        if new_unknown_count < unknown_count:
+            logger.info(f"未知场景整理完成，从 {unknown_count} 条减少到 {new_unknown_count} 条")
 
     def _add_observation(self, scene, recognition_text, active_window_title):
         """添加一条观察记录。"""
@@ -747,7 +825,8 @@ class ScreenCompanion(Star):
         }
         self.observations.append(observation)
         if len(self.observations) > self.max_observations:
-            self.observations = self.observations[-self.max_observations:]
+            # 每次达到上限时删除5条，保留15条
+            self.observations = self.observations[-15:]
         self._save_observations()
         return True
 
@@ -1103,22 +1182,36 @@ class ScreenCompanion(Star):
         normalized_scene = self._normalize_scene_label(scene)
         normalized_window = self._normalize_window_title(active_window_title)
 
-        prompt_parts = [base_prompt] if base_prompt else []
-
-        # 添加通用指导原则
-        prompt_parts.extend([
-            "请对屏幕内容进行详细分析，提供以下信息：",
-            "1. 屏幕的整体场景和主要内容",
-            "2. 关键元素的详细信息（如文本、图像、界面元素等）",
-            "3. 用户可能正在进行的任务或活动",
-            "4. 可能的问题或挑战",
-            "5. 具体、实用的建议或解决方案",
-            "6. 相关的上下文信息或背景知识"
-        ])
-
+        # 按重要性排序组织提示词部分
+        prompt_parts = []
+        
+        # 1. 基础提示词（如果有）
+        if base_prompt:
+            prompt_parts.append(base_prompt)
+        
+        # 2. 关键上下文信息
         if normalized_window:
             prompt_parts.append(f"当前窗口标题：{normalized_window}")
-
+        
+        # 3. Bot自身识别信息（用于识别屏幕中的自己）
+        bot_self_info = []
+        if hasattr(self, 'bot_appearance') and self.bot_appearance:
+            bot_self_info.append(f"Bot的外形描述：{self.bot_appearance}")
+        
+        if hasattr(self, 'long_term_memory') and self.long_term_memory.get('self_image'):
+            self_image_memories = self.long_term_memory['self_image']
+            # 按 count 排序，取最常见的几个记忆
+            sorted_memories = sorted(self_image_memories, key=lambda x: x.get('count', 0), reverse=True)[:3]
+            if sorted_memories:
+                bot_self_info.append("关于Bot自身的已知信息：")
+                for memory in sorted_memories:
+                    bot_self_info.append(f"- {memory['content']}")
+        
+        if bot_self_info:
+            prompt_parts.extend(bot_self_info)
+            prompt_parts.append("如果在屏幕中发现符合Bot外形描述的元素，请识别为Bot自己。")
+        
+        # 4. 场景特定指导
         scene_prompts = {
             "编程": "重点分析代码结构、语法、逻辑流程、错误信息、开发环境等。识别用户正在实现的功能、遇到的问题、代码优化空间，并提供具体的技术建议和解决方案。",
             "设计": "重点分析设计元素、布局、色彩搭配、视觉层次、用户体验等。识别设计任务的目标、当前的视觉问题、可以优化的方向，并提供具体的设计建议和改进方案。",
@@ -1128,15 +1221,26 @@ class ScreenCompanion(Star):
             "视频": "重点分析视频内容、画面细节、人物表情、场景氛围、对话内容等。识别视频的主题、情感基调、关键信息，并提供相关的见解和讨论点。",
             "阅读": "重点分析文本内容、标题结构、段落大意、关键观点、图表数据等。识别阅读材料的主题、核心思想、重要信息，并提供相关的理解和应用建议。",
         }
-
+        
         prompt_parts.append(
             scene_prompts.get(
                 normalized_scene,
                 "请全面分析屏幕内容，识别用户正在进行的活动，提取关键信息和细节，分析可能的问题或需求，并提供具体、实用的建议。",
             )
         )
-
-        prompt_parts.append("请提供详细、具体的分析结果，避免泛泛而谈或过于简略的描述。")
+        
+        # 5. 通用分析要求
+        prompt_parts.extend([
+            "请对屏幕内容进行详细分析，提供以下信息：",
+            "1. 屏幕的整体场景和主要内容",
+            "2. 关键元素的详细信息（如文本、图像、界面元素等）",
+            "3. 用户可能正在进行的任务或活动",
+            "4. 可能的问题或挑战",
+            "5. 具体、实用的建议或解决方案",
+            "6. 相关的上下文信息或背景知识",
+            "",
+            "请提供详细、具体的分析结果，避免泛泛而谈或过于简略的描述。"
+        ])
 
         return "\n".join(part for part in prompt_parts if part).strip()
 
@@ -1261,6 +1365,9 @@ class ScreenCompanion(Star):
         if not isinstance(memory, dict):
             return
 
+        # 保留 self_image 记忆
+        self_image_memory = memory.get("self_image", [])
+
         applications = memory.get("applications", {})
         if isinstance(applications, dict):
             cleaned_applications = {}
@@ -1334,6 +1441,12 @@ class ScreenCompanion(Star):
                     score_keys=("priority", "count"),
                 )
             memory["user_preferences"] = cleaned_preferences
+        
+        # 恢复 self_image 记忆
+        if self_image_memory:
+            memory["self_image"] = self_image_memory
+        else:
+            memory.pop("self_image", None)
 
     def _update_long_term_memory(self, scene, active_window, duration, user_preferences=None):
         """更新长期记忆。"""
@@ -1808,7 +1921,7 @@ class ScreenCompanion(Star):
 
         if (
             sys.platform == "win32"
-            and self.capture_mode == "active_window"
+            and self.capture_active_window
         ):
             try:
                 import pygetwindow
@@ -1881,12 +1994,11 @@ class ScreenCompanion(Star):
             logger.debug(f"获取屏幕尺寸失败: {e}")
 
         # 检查是否为陪伴模式
-        if self.watch_mode == "陪伴":
+        if self.use_companion_mode:
             companion_prompt = getattr(self, 'companion_prompt', None)
             if companion_prompt:
                 companion_supplemental_guide = (
-                    "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励。"
-                    "营造沉浸式的陪伴体验，让用户感受到持续的支持和关注。"
+                    "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
                 )
                 return f"{companion_prompt.rstrip()}{companion_supplemental_guide}"
 
@@ -1907,8 +2019,8 @@ class ScreenCompanion(Star):
 
     async def _get_start_response(self) -> str:
         """Build the startup reply text."""
-        mode = self.start_end_mode
-        if mode == "preset":
+        mode = "llm" if self.use_llm_for_start_end else "preset"
+        if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
             return self.start_preset
         else:
             provider = self.context.get_using_provider()
@@ -1930,8 +2042,8 @@ class ScreenCompanion(Star):
 
     async def _get_end_response(self) -> str:
         """生成结束陪伴时的回复。"""
-        mode = self.start_end_mode
-        if mode == "preset":
+        mode = "llm" if self.use_llm_for_start_end else "preset"
+        if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
             return self.end_preset
         else:
             provider = self.context.get_using_provider()
@@ -2170,7 +2282,7 @@ class ScreenCompanion(Star):
                 active_title, active_region = get_active_window_info()
                 screenshot = None
 
-                if self.capture_mode == "active_window" and active_region:
+                if self.capture_active_window and active_region:
                     try:
                         screenshot = pyautogui.screenshot(region=active_region)
                     except Exception as e:
@@ -2179,7 +2291,7 @@ class ScreenCompanion(Star):
                 if screenshot is None:
                     screenshot = pyautogui.screenshot()
 
-                source_label = active_title or ("活动窗口截图" if self.capture_mode == "active_window" else "实时截图")
+                source_label = active_title or ("活动窗口截图" if self.capture_active_window else "实时截图")
                 image_bytes = encode_image_to_jpeg_bytes(screenshot)
                 persist_shared_screenshot(image_bytes)
                 return image_bytes, source_label
@@ -2515,18 +2627,26 @@ class ScreenCompanion(Star):
                 "eclipse", "sublime", "atom", "notepad++", "vim", "emacs",
                 "phpstorm", "webstorm", "goland", "rider", "android studio", "xcode",
                 "terminal", "powershell", "cmd", "git", "github", "gitlab", "coding",
+                "dev", "developer", "program", "programming", "debug", "compile", "build",
+                "python", "java", "c++", "c#", "javascript", "typescript", "html", "css",
+                "ide", "editor", "console", "shell", "bash", "zsh", "powershell"
             ],
             "设计": [
                 "photoshop", "illustrator", "figma", "sketch", "xd", "gimp", "canva",
                 "photopea", "coreldraw", "blender", "maya", "3d", "design",
+                "creative", "art", "graphic", "ui", "ux", "wireframe", "prototype",
+                "adobe", "affinity", "paint", "draw", "illustration", "animation"
             ],
             "浏览": [
                 "chrome", "firefox", "edge", "safari", "opera", "browser", "???",
                 "chrome.exe", "firefox.exe", "edge.exe", "safari.exe", "opera.exe",
+                "browser", "web", "internet", "chrome", "firefox", "edge", "safari", "opera"
             ],
             "办公": [
                 "word", "excel", "powerpoint", "office", "??", "??", "wps", "outlook",
                 "office365", "onenote", "access", "project", "visio",
+                "document", "spreadsheet", "presentation", "calendar", "task", "todo",
+                "work", "office", "business", "report", "data", "analysis", "excel"
             ],
             "游戏": [
                 "steam", "epic", "battle.net", "valorant", "csgo", "dota", "minecraft",
@@ -2534,41 +2654,77 @@ class ScreenCompanion(Star):
                 "genshin", "roblox", "warcraft", "diablo", "starcraft", "hearthstone",
                 "fifa", "nba", "call of duty", "cod", "assassin's creed", "ac",
                 "grand theft auto", "gta", "the witcher", "cyberpunk", "fallout",
+                "game", "gaming", "play", "player", "level", "mission", "quest",
+                "character", "weapon", "map", "server", "multiplayer", "singleplayer"
             ],
             "视频": [
                 "youtube", "bilibili", "netflix", "vlc", "potplayer", "movie", "video", "??",
                 "youku", "tudou", "iqiyi", "letv", "mkv", "mp4", "wmv", "avi",
                 "media player", "kmplayer", "mplayer",
+                "video", "movie", "film", "tv", "show", "series", "episode", "streaming",
+                "watch", "player", "media", "video", "movie", "film", "tv", "show"
             ],
             "阅读": [
                 "novel", "reader", "ebook", "pdf", "reading", "??", "???", "???",
                 "adobe reader", "foxit", "kindle", "ibooks", "epub", "mobi",
+                "book", "read", "reading", "novel", "story", "document", "pdf", "epub"
             ],
             "音乐": [
                 "spotify", "apple music", "music", "itunes", "?????", "qq??", "musicbee",
                 "网易云", "netease", "kuwo", "kugou", "qq music", "winamp", "foobar",
+                "music", "song", "audio", "player", "music", "song", "audio", "playlist"
             ],
             "社交": [
                 "discord", "wechat", "qq", "skype", "zoom", "teams", "slack",
                 "whatsapp", "telegram", "signal", "messenger", "facebook", "instagram",
                 "twitter", "x", "linkedin", "tiktok", "douyin",
+                "chat", "message", "social", "contact", "friend", "conversation"
             ],
             "邮件": [
                 "outlook", "gmail", "mail", "thunderbird", "mailchimp", "protonmail",
-                "邮件", "email", "inbox",
+                "邮件", "email", "inbox", "mail", "email", "message", "inbox", "outbox"
             ],
             "工具": [
                 "calculator", "notepad", "paint", "snip", "snipping", "screenshot",
                 "explorer", "finder", "file explorer", "task manager", "control panel",
+                "tool", "utility", "app", "application", "program", "software"
             ],
         }
 
+        # 首先尝试精确匹配
         for scene, keywords in keyword_groups.items():
             if any(keyword in title_lower for keyword in keywords):
                 # 如果是浏览器场景，进一步分类
                 if scene == "浏览":
                     return self._classify_browser_content(window_title)
                 return scene
+
+        # 尝试更宽松的匹配，检查窗口标题中是否包含常见的场景相关词汇
+        loose_match = {
+            "编程": ["代码", "程序", "开发", "debug", "编译", "运行"],
+            "设计": ["设计", "创意", "美术", "绘图", "编辑"],
+            "办公": ["文档", "表格", "演示", "会议", "工作"],
+            "游戏": ["游戏", "游玩", "关卡", "任务", "角色"],
+            "视频": ["视频", "电影", "电视", "节目", "播放"],
+            "阅读": ["阅读", "书籍", "小说", "文档", "文章"],
+            "音乐": ["音乐", "歌曲", "音频", "播放"],
+            "社交": ["聊天", "消息", "社交", "联系", "朋友"],
+            "邮件": ["邮件", "邮箱", "邮件", "发送", "接收"],
+        }
+
+        for scene, keywords in loose_match.items():
+            if any(keyword in title_lower for keyword in keywords):
+                return scene
+
+        # 最后，根据窗口标题的长度和内容进行判断
+        if len(title_lower) > 10:
+            # 如果标题较长，可能是浏览器或其他应用
+            if any(browser in title_lower for browser in ["chrome", "firefox", "edge", "safari", "opera"]):
+                return "浏览"
+            elif any(video in title_lower for video in ["youtube", "bilibili", "netflix", "video", "movie"]):
+                return "视频"
+            elif any(game in title_lower for game in ["game", "steam", "epic"]):
+                return "游戏"
 
         return "未知"
 
@@ -2921,8 +3077,7 @@ class ScreenCompanion(Star):
             
 
             
-            # 添加少量不确定表达
-            response_text = self._add_uncertainty(response_text)
+            # 不再添加不确定表达
 
             # 更新活动状态，记录工作/摸鱼时间
             self._update_activity(scene, active_window_title)
@@ -3218,51 +3373,99 @@ class ScreenCompanion(Star):
         """停止自动观察任务。"""
         if task_id:
             if task_id in self.auto_tasks:
-                logger.info(f"取消任务 {task_id}")
-                task = self.auto_tasks[task_id]
+                task = self.auto_tasks.pop(task_id)
                 task.cancel()
-
                 try:
                     await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning(f"等待任务 {task_id} 停止超时")
                 except asyncio.CancelledError:
-                    logger.info(f"[Task {task_id}] status update")
+                    pass
                 except Exception as e:
-                    logger.error(f"等待任务 {task_id} 停止时出错: {e}")
-
-                del self.auto_tasks[task_id]
-                if not self.auto_tasks:
-                    self.is_running = False
-                    self.state = "inactive"
-                yield event.plain_result(f"已停止任务 {task_id}。")
+                    logger.error(f"停止任务 {task_id} 失败: {e}")
+                yield event.plain_result(f"已停止自动观察任务 {task_id}。")
             else:
-                yield event.plain_result(f"没有找到任务 {task_id}。")
+                yield event.plain_result(f"任务 {task_id} 不存在。")
         else:
-            logger.info("正在停止所有自动观察任务...")
-            self.is_running = False
-            self.state = "inactive"
-
-            # 停止所有自动任务（不包含临时任务）
+            # 停止所有自动任务
             tasks_to_cancel = list(self.auto_tasks.items())
             for task_id, task in tasks_to_cancel:
-                logger.info(f"取消任务 {task_id}")
                 task.cancel()
-
-            for task_id, task in tasks_to_cancel:
                 try:
                     await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
                     logger.warning(f"等待任务 {task_id} 停止超时")
                 except asyncio.CancelledError:
-                    logger.info(f"[Task {task_id}] status update")
+                    pass
                 except Exception as e:
-                    logger.error(f"等待任务 {task_id} 停止时出错: {e}")
-
-            self.auto_tasks.clear()
-            logger.info("所有自动观察任务已停止")
+                    logger.error(f"停止任务 {task_id} 失败: {e}")
+                self.auto_tasks.pop(task_id, None)
+            
+            # 停止窗口陪伴任务
+            if hasattr(self, "window_companion_active_title") and self.window_companion_active_title:
+                await self._stop_window_companion_session(reason="manual_stop")
+            
+            self.is_running = False
+            self.state = "inactive"
             end_response = await self._get_end_response()
-            yield event.plain_result(end_response)
+            yield event.plain_result(f"已停止所有自动观察任务。\n{end_response}")
+
+    @filter.command("webui")
+    async def webui_command(self, event: AstrMessageEvent):
+        """查看 WebUI 信息。"""
+        if self.webui_enabled:
+            # 检查 WebUI 服务是否正在运行
+            webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
+            
+            if webui_running:
+                # 获取实际使用的端口
+                actual_port = getattr(self.web_server, "port", self.webui_port)
+                host = self.webui_host
+                if host == "0.0.0.0":
+                    access_url = f"http://127.0.0.1:{actual_port}"
+                else:
+                    access_url = f"http://{host}:{actual_port}"
+                
+                auth_status = "已启用" if self.webui_auth_enabled else "未启用"
+                password = self.webui_password or "（未设置，首次访问时会自动生成）"
+                
+                response = f"WebUI 状态：已启用\n"
+                response += f"访问地址：{access_url}\n"
+                response += f"认证状态：{auth_status}\n"
+                response += f"访问密码：{password}\n"
+                response += f"会话超时：{self.webui_session_timeout} 秒"
+            else:
+                # WebUI 已启用但服务未运行，尝试启动
+                try:
+                    await self._start_webui()
+                    # 再次检查状态
+                    webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
+                    if webui_running:
+                        actual_port = getattr(self.web_server, "port", self.webui_port)
+                        host = self.webui_host
+                        if host == "0.0.0.0":
+                            access_url = f"http://127.0.0.1:{actual_port}"
+                        else:
+                            access_url = f"http://{host}:{actual_port}"
+                        
+                        auth_status = "已启用" if self.webui_auth_enabled else "未启用"
+                        password = self.webui_password or "（未设置，首次访问时会自动生成）"
+                        
+                        response = f"WebUI 状态：已启用\n"
+                        response += f"访问地址：{access_url}\n"
+                        response += f"认证状态：{auth_status}\n"
+                        response += f"访问密码：{password}\n"
+                        response += f"会话超时：{self.webui_session_timeout} 秒"
+                    else:
+                        response = f"WebUI 已启用但启动失败，请检查配置和端口占用情况。\n"
+                        response += f"配置的端口：{self.webui_port}\n"
+                        response += f"配置的地址：{self.webui_host}"
+                except Exception as e:
+                    response = f"WebUI 已启用但启动失败：{str(e)}"
+        else:
+            response = "WebUI 未启用，请在配置中开启。"
+        
+        yield event.plain_result(response)
 
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
@@ -4255,28 +4458,7 @@ class ScreenCompanion(Star):
 
     def _add_uncertainty(self, response):
         """为回复增加少量自然的不确定表达。"""
-        import random
-        
-        if random.random() < 0.3:
-            uncertainty_word = random.choice(self.uncertainty_words)
-            # 根据句子结构选择更自然的插入位置
-            if response.startswith(("?", "?", "?", "?", "?", "?", "?")):
-                response = uncertainty_word + "?" + response
-            else:
-                sentences = response.split("?")
-                if sentences:
-                    # 随机选择一个句子并插入不确定词
-                    target_index = random.randint(0, len(sentences) - 1)
-                    target_sentence = sentences[target_index]
-                    if target_sentence:
-                        words = target_sentence.split(' ')
-                        if len(words) > 1:
-                            insert_pos = random.randint(0, len(words) - 1)
-                            words.insert(insert_pos, uncertainty_word)
-                            target_sentence = ' '.join(words)
-                        sentences[target_index] = target_sentence
-                    response = "?".join(sentences)
-        
+        # 不再添加不确定表达，直接返回原始回复
         return response
 
     def _polish_response_text(self, response_text, scene):
@@ -4325,9 +4507,103 @@ class ScreenCompanion(Star):
             "corrected": corrected_response,
             "timestamp": datetime.datetime.now().isoformat()
         }
+        
+        # 分析纠正内容，提取关键信息
+        self._analyze_correction_content(original_response, corrected_response)
+        
         # 保存纠正数据
         self._save_corrections()
         logger.info("已记录一条用户纠正数据")
+    
+    def _analyze_correction_content(self, original, corrected):
+        """分析纠正内容，提取关键信息并更新长期记忆。"""
+        import re
+        
+        # 转换为小写进行分析
+        original_lower = original.lower()
+        corrected_lower = corrected.lower()
+        
+        # 提取关于自身形象的纠正
+        if "形象" in corrected_lower or "logo" in corrected_lower or "输入法" in corrected_lower:
+            self._update_self_image_memory(corrected)
+        
+        # 提取关于场景的纠正
+        scene_patterns = ["场景", "是在", "正在", "在做"]
+        if any(pattern in corrected_lower for pattern in scene_patterns):
+            self._update_scene_memory(corrected)
+        
+        # 提取关于应用的纠正
+        app_patterns = ["应用", "程序", "软件", "工具"]
+        if any(pattern in corrected_lower for pattern in app_patterns):
+            self._update_application_memory(corrected)
+    
+    def _update_self_image_memory(self, correction):
+        """更新关于自身形象的记忆。"""
+        if "self_image" not in self.long_term_memory:
+            self.long_term_memory["self_image"] = []
+        
+        # 检查是否已经存在类似的记忆
+        correction_lower = correction.lower()
+        for existing in self.long_term_memory["self_image"]:
+            if correction_lower in existing["content"].lower() or existing["content"].lower() in correction_lower:
+                # 更新现有记忆
+                existing["timestamp"] = datetime.datetime.now().isoformat()
+                existing["count"] = existing.get("count", 0) + 1
+                break
+        else:
+            # 添加新记忆
+            self.long_term_memory["self_image"].append({
+                "content": correction,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "count": 1
+            })
+        
+        # 保存长期记忆
+        self._save_long_term_memory()
+        logger.info("已更新自身形象记忆")
+    
+    def _update_scene_memory(self, correction):
+        """更新关于场景的记忆。"""
+        # 简单实现，后续可以扩展更复杂的场景提取逻辑
+        if "scenes" not in self.long_term_memory:
+            self.long_term_memory["scenes"] = {}
+        
+        # 提取可能的场景名称
+        scene_keywords = ["编程", "设计", "办公", "游戏", "视频", "阅读", "音乐", "社交", "浏览"]
+        for keyword in scene_keywords:
+            if keyword in correction:
+                if keyword not in self.long_term_memory["scenes"]:
+                    self.long_term_memory["scenes"][keyword] = {
+                        "count": 0,
+                        "last_used": datetime.datetime.now().isoformat()
+                    }
+                self.long_term_memory["scenes"][keyword]["count"] += 1
+                self.long_term_memory["scenes"][keyword]["last_used"] = datetime.datetime.now().isoformat()
+                break
+        
+        # 保存长期记忆
+        self._save_long_term_memory()
+    
+    def _update_application_memory(self, correction):
+        """更新关于应用的记忆。"""
+        if "applications" not in self.long_term_memory:
+            self.long_term_memory["applications"] = {}
+        
+        # 简单实现，后续可以扩展更复杂的应用提取逻辑
+        # 这里只是一个示例，实际应用需要更复杂的解析
+        app_name = correction.split(" ")[0]
+        if app_name:
+            if app_name not in self.long_term_memory["applications"]:
+                self.long_term_memory["applications"][app_name] = {
+                    "usage_count": 0,
+                    "last_used": datetime.datetime.now().isoformat(),
+                    "scenes": {}
+                }
+            self.long_term_memory["applications"][app_name]["usage_count"] += 1
+            self.long_term_memory["applications"][app_name]["last_used"] = datetime.datetime.now().isoformat()
+        
+        # 保存长期记忆
+        self._save_long_term_memory()
 
     def _update_learning_data(self, scene, feedback):
         """更新学习数据。"""

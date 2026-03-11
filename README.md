@@ -94,6 +94,7 @@ pip install -r requirements.txt
 | `/kpi complete [YYYY-MM-DD]` | 补写指定日期日记 |
 | `/kpi debug [on/off]` | 切换调试模式 |
 | `/kpi webui [start/stop]` | 启动或停止 WebUI |
+| `/kpi webui` | 查看 WebUI 端口信息 |
 
 ## 外部 API 调用
 
@@ -179,6 +180,17 @@ POST /api/auth/login
 - `token`：认证令牌（如果成功）
 - `error`：错误信息（如果失败）
 
+## 2.5.2 更新摘要
+
+- **新增错误纠正和记忆**：实现了错误纠正和持续性记忆功能，使 Bot 能够从用户的纠正中学习
+- **新增自我形象识别**：实现了自我形象识别和记忆，使 Bot 能够认出屏幕中的自己
+- **新增 webui 命令**：实现了 `webui` 命令来返回端口信息
+- **修复 WebUI 错误**：修复了 "TCPSite.__init__() got an unexpected keyword argument 'sock'" 错误
+- **修复编码错误**：修复了 "charset must not be in content_type argument" 和 "json_response() got an unexpected keyword argument 'charset'" 错误
+- **优化提示词系统**：优化了 `_build_vision_prompt` 方法，按重要性排序组织提示词，以降低 LLM 反应时间
+- **更新默认端口**：将默认端口从 8898 更新到 6314
+- **优化端口管理**：减少了自动切换端口的次数从 10 到 3
+
 ## 2.5.1 更新摘要
 
 - **修复窗口变化检测**：解决 `window_change_cooldown` 属性缺失导致的任务异常
@@ -225,6 +237,7 @@ POST /api/auth/login
 - `webui.port`
 - `webui.auth_enabled`
 - `webui.allow_external_api`
+- `bot_appearance`（Bot 外形描述，用于识别屏幕中的自己）
 - `companion_prompt`（陪伴模式系统提示词）
 
 ## 隐私与安全
@@ -254,7 +267,7 @@ python scripts/check_text_health.py --strict
 
 ## 开发者信息
 
-开发者：menglimi
+开发者：menglimi（烛雨）
 qq：995051631
 写点什么：什么什么什么
 喜欢的话可以给我点个小星星,有好的建议可以告诉我

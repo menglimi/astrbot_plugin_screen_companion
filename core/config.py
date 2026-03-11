@@ -2,37 +2,48 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from enum import Enum
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
 
+# 枚举类型定义
+# 已移除 WatchMode 枚举类型，改为布尔值开关
+
+class InteractionMode(str, Enum):
+    CUSTOM = "自定义"
+    AUTO = "自动"
+    MANUAL = "手动"
+
+# 已移除 CaptureMode 和 StartEndMode 枚举类型，改为布尔值开关
+
 class WebuiConfig(BaseModel):
-    enabled: bool = False
-    host: str = "0.0.0.0"
-    port: int = 8898
-    auth_enabled: bool = True
-    password: str = ""
-    session_timeout: int = 3600
-    allow_external_api: bool = False
+    enabled: bool = Field(default=False, description="是否启用 WebUI")
+    host: str = Field(default="0.0.0.0", description="WebUI 监听地址")
+    port: int = Field(default=6314, ge=1, le=65535, description="WebUI 监听端口")
+    auth_enabled: bool = Field(default=True, description="是否启用认证")
+    password: str = Field(default="", description="WebUI 访问密码")
+    session_timeout: int = Field(default=3600, ge=60, le=86400, description="WebUI 会话有效期（秒）")
+    allow_external_api: bool = Field(default=False, description="是否允许外部 API 访问")
 
 
 class PluginConfig(BaseModel):
     # === 基础功能 ===
     bot_name: str = "屏幕助手"
     enabled: bool = False
-    interaction_mode: str = "自定义"
+    interaction_mode: InteractionMode = InteractionMode.CUSTOM
     check_interval: int = 300
     trigger_probability: int = 30
     active_time_range: str = ""
     # === 自定义预设配置 ===
     custom_presets: str = ""  # 格式: 预设1名称|间隔|概率,预设2名称|间隔|概率
     current_preset_index: int = 0  # 当前使用的预设索引
-    watch_mode: str = "偷看"  # 可选值: 偷看, 陪伴
-    companion_prompt: str = "你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供贴心的建议和鼓励，营造沉浸式的陪伴体验。"
-    capture_mode: str = "fullscreen"
+    use_companion_mode: bool = False  # 是否使用陪伴模式（开启为陪伴模式，关闭为偷看模式）
+    companion_prompt: str = "你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
+    capture_active_window: bool = False  # 是否只截取活动窗口
     bot_vision_quality: int = 85
     image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
     use_external_vision: bool = True
@@ -44,14 +55,14 @@ class PluginConfig(BaseModel):
     vision_api_key_backup: str = ""
     vision_api_model_backup: str = ""
     user_preferences: str = "游戏 专业的游戏高手，指导玩家提升水平"
-    start_end_mode: str = "llm"
+    use_llm_for_start_end: bool = True  # 是否使用LLM回复开始和结束消息
     start_preset: str = "知道啦~我会时不时过来看一眼的"
     end_preset: str = "好啦，我不看了～下次再陪你玩！"
     start_llm_prompt: str = "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。"
     end_llm_prompt: str = "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。"
     enable_diary: bool = True
     diary_time: str = "22:00"
-    diary_storage: str = "E:\\astrbot\\小日记"
+    diary_storage: str = "E:\astrbot\小日记"
     diary_reference_days: int = 2
     diary_auto_recall: bool = False
     diary_recall_time: int = 30
@@ -79,13 +90,99 @@ class PluginConfig(BaseModel):
     debug: bool = False
     # === 额外配置 ===
     observation_storage: str = ""
-    max_observations: int = 5
+    max_observations: int = 20
     interaction_frequency: int = 5
     image_quality: int = 70
     system_prompt: str = "角色设定：窥屏助手\n把你正在使用的人格复制到这里"
+    bot_appearance: str = ""  # Bot的外形描述，用于在屏幕中识别自己
 
     # === WebUI 管理界面 ===
     webui: WebuiConfig = Field(default_factory=WebuiConfig)
+
+    # 验证器
+    @field_validator('check_interval')
+    @classmethod
+    def validate_check_interval(cls, v):
+        if v < 10:
+            raise ValueError('check_interval 不能小于 10 秒')
+        return v
+
+    @field_validator('trigger_probability')
+    @classmethod
+    def validate_trigger_probability(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('trigger_probability 必须在 0-100 之间')
+        return v
+
+    @field_validator('bot_vision_quality')
+    @classmethod
+    def validate_bot_vision_quality(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('bot_vision_quality 必须在 0-100 之间')
+        return v
+
+    @field_validator('image_quality')
+    @classmethod
+    def validate_image_quality(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('image_quality 必须在 0-100 之间')
+        return v
+
+    @field_validator('diary_reference_days')
+    @classmethod
+    def validate_diary_reference_days(cls, v):
+        if v < 0:
+            raise ValueError('diary_reference_days 不能小于 0')
+        return v
+
+    @field_validator('diary_recall_time')
+    @classmethod
+    def validate_diary_recall_time(cls, v):
+        if v < 0:
+            raise ValueError('diary_recall_time 不能小于 0')
+        return v
+
+    @field_validator('mic_threshold')
+    @classmethod
+    def validate_mic_threshold(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('mic_threshold 必须在 0-100 之间')
+        return v
+
+    @field_validator('mic_check_interval')
+    @classmethod
+    def validate_mic_check_interval(cls, v):
+        if v < 1:
+            raise ValueError('mic_check_interval 不能小于 1 秒')
+        return v
+
+    @field_validator('window_companion_check_interval')
+    @classmethod
+    def validate_window_companion_check_interval(cls, v):
+        if v < 1:
+            raise ValueError('window_companion_check_interval 不能小于 1 秒')
+        return v
+
+    @field_validator('max_observations')
+    @classmethod
+    def validate_max_observations(cls, v):
+        if v < 1:
+            raise ValueError('max_observations 不能小于 1')
+        return v
+
+    @field_validator('interaction_frequency')
+    @classmethod
+    def validate_interaction_frequency(cls, v):
+        if v < 1 or v > 10:
+            raise ValueError('interaction_frequency 必须在 1-10 之间')
+        return v
+
+    @field_validator('interaction_kpi')
+    @classmethod
+    def validate_interaction_kpi(cls, v):
+        if v < 0:
+            raise ValueError('interaction_kpi 不能小于 0')
+        return v
 
     # === 忽略额外字段 ===
     class Config:
