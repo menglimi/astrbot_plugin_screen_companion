@@ -3178,12 +3178,19 @@ class ScreenCompanion(Star):
         task_id: str = "unknown",
     ) -> list[BaseMessageComponent]:
         """执行一次完整的截图分析与陪伴式回复。"""
+        # 如果当前处于休息时间段，则不调用视觉模型
+        if self._is_in_rest_time_range():
+            logger.info(
+                f"[任务 {task_id}] 当前处于休息时间段，不调用视觉模型"
+            )
+            return []
+        
         # 在调用视觉 API 之前检查活跃时间段
         if not self._is_in_active_time_range():
             logger.info(
                 f"[任务 {task_id}] 当前不在活跃时间段内，取消视觉 API 调用以节省 token"
             )
-            return [Plain("现在不是我活跃的时间，让我先休息一会儿。")]
+            return []
 
         provider = self.context.get_using_provider()
         if not provider:
@@ -5062,6 +5069,7 @@ class ScreenCompanion(Star):
             return
 
         lines = self.custom_tasks.strip().split("\n")
+        seen_tasks = set()  # 用于去重
         for line in lines:
             line = line.strip()
             if not line:
@@ -5076,6 +5084,12 @@ class ScreenCompanion(Star):
             try:
                 hour, minute = map(int, time_str.split(":"))
                 if 0 <= hour < 24 and 0 <= minute < 60:
+                    task_key = f"{hour}:{minute}:{prompt}"
+                    # 去重：如果任务已存在，则跳过
+                    if task_key in seen_tasks:
+                        logger.warning(f"发现重复的自定义任务: {time_str} {prompt}，已跳过")
+                        continue
+                    seen_tasks.add(task_key)
                     self.parsed_custom_tasks.append(
                         {"hour": hour, "minute": minute, "prompt": prompt}
                     )
