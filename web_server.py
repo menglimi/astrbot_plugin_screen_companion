@@ -884,8 +884,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.5.3",
-                "plugin_version": "2.5.3"
+                "version": "2.5.4",
+                "plugin_version": "2.5.4"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1201,8 +1201,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-                "version": "2.5.3",
-                "plugin_version": "2.5.3",
+                "version": "2.5.4",
+                "plugin_version": "2.5.4",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
