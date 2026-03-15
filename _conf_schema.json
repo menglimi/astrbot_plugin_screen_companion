@@ -458,7 +458,7 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:FriendMessage:123456",
+      "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。建议直接填写实际会话ID，例如 default:FriendMessage:123456；旧格式 aiocqhttp:FriendMessage:123456 也会自动兼容。",
     "default": "",
     "condition": {
       "enabled": true

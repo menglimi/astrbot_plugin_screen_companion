@@ -427,19 +427,185 @@ class ScreenCompanion(Star):
         """Resolve the proactive message target."""
         target = str(getattr(self, "proactive_target", "") or "").strip()
         if target:
-            return target
+            return self._normalize_target(target)
 
         admin_qq = str(getattr(self, "admin_qq", "") or "").strip()
         if admin_qq:
-            return f"aiocqhttp:FriendMessage:{admin_qq}"
+            return self._build_private_target(admin_qq)
         return ""
+
+    def _get_available_platforms(self) -> list[Any]:
+        """Return loaded platform instances, preferring non-webchat adapters."""
+        platform_manager = getattr(self.context, "platform_manager", None)
+        if not platform_manager:
+            return []
+
+        platforms = list(getattr(platform_manager, "platform_insts", []) or [])
+        if not platforms:
+            return []
+
+        filtered = []
+        for platform in platforms:
+            try:
+                meta = platform.meta()
+                if str(getattr(meta, "name", "") or "").strip() == "webchat":
+                    continue
+            except Exception:
+                pass
+            filtered.append(platform)
+        return filtered or platforms
+
+    def _get_preferred_platform_id(self) -> str:
+        """Resolve the platform instance ID used for proactive messages."""
+        platforms = self._get_available_platforms()
+        if platforms:
+            try:
+                platform_id = str(getattr(platforms[0].meta(), "id", "") or "").strip()
+                if platform_id:
+                    return platform_id
+            except Exception as e:
+                logger.debug(f"获取默认平台 ID 失败: {e}")
+        return "default"
+
+    def _build_private_target(self, session_id: str) -> str:
+        """Build a private-chat target with the active platform instance ID."""
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return ""
+        return f"{self._get_preferred_platform_id()}:FriendMessage:{session_id}"
+
+    def _normalize_target(self, target: str) -> str:
+        """Rewrite legacy proactive targets to the active platform instance ID."""
+        target = str(target or "").strip()
+        if not target:
+            return ""
+
+        parts = target.split(":", 2)
+        if len(parts) != 3:
+            return target
+
+        platform_token, message_type, session_id = parts
+        platforms = self._get_available_platforms()
+        if not platforms:
+            return target
+
+        for platform in platforms:
+            try:
+                meta = platform.meta()
+                platform_id = str(getattr(meta, "id", "") or "").strip()
+                platform_name = str(getattr(meta, "name", "") or "").strip()
+            except Exception:
+                continue
+
+            if platform_token in {platform_id, platform_name}:
+                normalized = f"{platform_id}:{message_type}:{session_id}"
+                if normalized != target:
+                    logger.info(f"主动消息目标已规范化: {target} -> {normalized}")
+                return normalized
+
+        legacy_platform_tokens = {
+            "default",
+            "aiocqhttp",
+            "qq_official",
+            "qq_official_webhook",
+            "telegram",
+            "discord",
+            "wecom",
+            "wecom_ai_bot",
+            "weixin_official_account",
+            "line",
+            "kook",
+            "satori",
+            "lark",
+            "dingtalk",
+            "misskey",
+            "slack",
+        }
+        if len(platforms) == 1 and platform_token in legacy_platform_tokens:
+            try:
+                platform_id = str(getattr(platforms[0].meta(), "id", "") or "").strip()
+            except Exception:
+                platform_id = ""
+            if platform_id:
+                normalized = f"{platform_id}:{message_type}:{session_id}"
+                if normalized != target:
+                    logger.info(f"主动消息目标已回退到当前平台实例 ID: {target} -> {normalized}")
+                return normalized
+
+        return target
 
     def _create_virtual_event(self, target: str):
         """Build a lightweight virtual event for proactive tasks."""
         event = type("VirtualEvent", (), {})()
-        event.unified_msg_origin = target
+        event.unified_msg_origin = self._normalize_target(target)
         event.config = self.plugin_config
         return event
+
+    async def _send_proactive_message(
+        self, target: str, message_chain: MessageChain
+    ) -> bool:
+        """Send a proactive message via the resolved platform instance."""
+        target = self._normalize_target(target)
+        if not target:
+            return False
+
+        session = None
+        try:
+            from astrbot.core.platform.message_session import MessageSesion
+
+            session = MessageSesion.from_str(target)
+        except Exception as e:
+            logger.debug(f"解析主动消息目标失败，将回退到 context.send_message: {e}")
+
+        if session is not None:
+            platforms = self._get_available_platforms()
+            matched_platform = None
+            for platform in platforms:
+                try:
+                    meta = platform.meta()
+                    platform_id = str(getattr(meta, "id", "") or "").strip()
+                    platform_name = str(getattr(meta, "name", "") or "").strip()
+                except Exception:
+                    continue
+                if session.platform_name in {platform_id, platform_name}:
+                    matched_platform = platform
+                    if session.platform_name != platform_id:
+                        session = MessageSesion(
+                            platform_id, session.message_type, session.session_id
+                        )
+                    break
+
+            if matched_platform is None and platforms:
+                matched_platform = platforms[0]
+                try:
+                    fallback_platform_id = str(
+                        getattr(matched_platform.meta(), "id", "") or ""
+                    ).strip()
+                    if fallback_platform_id:
+                        session = MessageSesion(
+                            fallback_platform_id,
+                            session.message_type,
+                            session.session_id,
+                        )
+                        logger.info(
+                            f"主动消息目标未命中平台，已回退为 {fallback_platform_id}:{session.message_type.value}:{session.session_id}"
+                        )
+                except Exception as e:
+                    logger.debug(f"构造主动消息回退会话失败: {e}")
+
+            if matched_platform is not None:
+                try:
+                    await matched_platform.send_by_session(session, message_chain)
+                    return True
+                except Exception as e:
+                    logger.warning(f"主动消息直发失败，将回退到 context.send_message: {e}")
+
+        try:
+            await self.context.send_message(target, message_chain)
+            return True
+        except Exception as e:
+            logger.error(f"发送主动消息失败: {e}")
+            return False
 
     async def _send_plain_message(self, target: str, text: str) -> bool:
         """Send a plain proactive message if possible."""
@@ -448,12 +614,9 @@ class ScreenCompanion(Star):
         if not target or not text:
             return False
 
-        try:
-            await self.context.send_message(target, MessageChain([Plain(text)]))
-            return True
-        except Exception as e:
-            logger.error(f"发送主动消息失败: {e}")
-            return False
+        return await self._send_proactive_message(
+            target, MessageChain([Plain(text)])
+        )
 
     def _build_window_companion_prompt(self, window_title: str, extra_prompt: str = "") -> str:
         """Build a focused prompt for window companion sessions."""
@@ -4998,11 +5161,11 @@ class ScreenCompanion(Star):
             yield event.plain_result(msg)
 
     @kpi_group.command("ffmpeg")
-    async def kpi_ffmpeg(self, event: AstrMessageEvent, path: str = None):
+    async def kpi_ffmpeg(self, event: AstrMessageEvent, ffmpeg_path: str = None):
         """设置 ffmpeg 路径并自动复制到插件目录。"""
         import shutil
         
-        if not path:
+        if not ffmpeg_path:
             current_ffmpeg = self._get_ffmpeg_path()
             if current_ffmpeg:
                 yield event.plain_result(f"当前 ffmpeg 路径：{current_ffmpeg}")
@@ -5016,7 +5179,7 @@ class ScreenCompanion(Star):
                 )
             return
         
-        source_path = os.path.abspath(os.path.expanduser(path.strip()))
+        source_path = os.path.abspath(os.path.expanduser(ffmpeg_path.strip()))
         
         ffmpeg_bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
         os.makedirs(ffmpeg_bin_dir, exist_ok=True)
@@ -6419,18 +6582,15 @@ class ScreenCompanion(Star):
                                 # 创建一个虚拟 event 对象，用于传给 _analyze_screen
                                 class VirtualEvent:
                                     def __init__(self):
-                                        self.unified_msg_origin = self._get_default_target()
+                                        self.unified_msg_origin = ""
 
                                     def _get_default_target(self):
-                                        admin_qq = self.admin_qq
-                                        if admin_qq:
-                                            return f"aiocqhttp:FriendMessage:{admin_qq}"
                                         return ""
 
                                 # 绑定 config 到 VirtualEvent
                                 VirtualEvent.config = self.plugin_config
 
-                                event = VirtualEvent()
+                                event = self._create_virtual_event(self._get_default_target())
 
                                 capture_context = await asyncio.wait_for(
                                     self._capture_recognition_context(), timeout=20.0
@@ -6448,11 +6608,7 @@ class ScreenCompanion(Star):
                                 )
 
                                 # 确定消息发送目标
-                                target = self.proactive_target
-                                if not target:
-                                    admin_qq = self.admin_qq
-                                    if admin_qq:
-                                        target = f"aiocqhttp:FriendMessage:{admin_qq}"
+                                target = self._get_default_target()
 
                                 if target:
                                     # 提取文本内容并发送
@@ -6463,7 +6619,7 @@ class ScreenCompanion(Star):
 
                                     if text_content:
                                         message = f"【声音提醒】\n{text_content}"
-                                        await self.context.send_message(
+                                        await self._send_proactive_message(
                                             target, MessageChain([Plain(message)])
                                         )
                                         logger.info("麦克风提醒消息发送成功")
@@ -6682,11 +6838,7 @@ class ScreenCompanion(Star):
                                     )
 
                                     # 确定消息发送目标
-                                    target = self.proactive_target
-                                    if not target:
-                                        admin_qq = self.admin_qq
-                                        if admin_qq:
-                                            target = f"aiocqhttp:FriendMessage:{admin_qq}"
+                                    target = self._get_default_target()
 
                                     if target:
                                         # 提取文本内容并发送
@@ -6697,7 +6849,7 @@ class ScreenCompanion(Star):
 
                                         if text_content:
                                             message = f"【定时提醒】\n{text_content}"
-                                            await self.context.send_message(
+                                            await self._send_proactive_message(
                                                 target, MessageChain([Plain(message)])
                                             )
                                             logger.info("自定义任务提醒消息发送成功")
@@ -6979,12 +7131,12 @@ class ScreenCompanion(Star):
                             chain.chain.append(comp)
 
                         # Determine the proactive message target
-                        target = self.proactive_target
+                        target = self._get_default_target()
                         if not target:
                             admin_qq = self.admin_qq
                             if admin_qq:
                                 # 使用管理员 QQ 构建消息目标
-                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
+                                target = self._build_private_target(admin_qq)
                                 logger.info(f"使用管理员 QQ 构建消息目标: {target}")
                             else:
                                 # 回退到原始事件目标
@@ -6995,7 +7147,7 @@ class ScreenCompanion(Star):
                                     logger.error(f"获取原始事件目标失败: {e}")
                                     # 使用默认目标
                                     target = (
-                                        f"aiocqhttp:FriendMessage:{admin_qq}"
+                                        self._build_private_target(admin_qq)
                                         if admin_qq
                                         else ""
                                     )
@@ -7028,7 +7180,7 @@ class ScreenCompanion(Star):
                                         break
                                     segment = segments[i]
                                     if segment.strip():
-                                        await self.context.send_message(
+                                        await self._send_proactive_message(
                                             target,
                                             MessageChain([Plain(segment)]),
                                         )
@@ -7037,19 +7189,19 @@ class ScreenCompanion(Star):
                                     self.is_running
                                     and segments[-1].strip()
                                 ):
-                                    await self.context.send_message(
+                                    await self._send_proactive_message(
                                         target,
                                         MessageChain([Plain(segments[-1])]),
                                     )
                             else:
                                 if self.is_running:
-                                    await self.context.send_message(
+                                    await self._send_proactive_message(
                                         target,
                                         MessageChain([Plain(text_content)]),
                                     )
                         else:
                             if self.is_running:
-                                await self.context.send_message(
+                                await self._send_proactive_message(
                                     target, chain
                                 )
 
