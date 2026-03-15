@@ -42,11 +42,16 @@ class PluginConfig(BaseModel):
     custom_presets: str = ""  # 格式: 预设1名称|间隔|概率,预设2名称|间隔|概率
     current_preset_index: int = 0  # 当前使用的预设索引
     use_companion_mode: bool = False  # 是否使用陪伴模式（开启为陪伴模式，关闭为偷看模式）
-    companion_prompt: str = "你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
+    companion_prompt: str = "你需要想象自己真实地将持续待在用户身边并与用户一起观看其屏幕内容，并实时地与用户进行互动。"
     capture_active_window: bool = False  # 是否只截取活动窗口
     bot_vision_quality: int = 85
     image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
+    screen_recognition_mode: bool = False
+    ffmpeg_path: str = ""
+    recording_fps: float = 1.0
+    recording_duration_seconds: int = 10
     use_external_vision: bool = True
+    allow_unsafe_video_direct_fallback: bool = False
     vision_api_url: str = ""
     vision_api_key: str = ""
     vision_api_model: str = ""
@@ -62,7 +67,7 @@ class PluginConfig(BaseModel):
     end_llm_prompt: str = "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。"
     enable_diary: bool = True
     diary_time: str = "22:00"
-    diary_storage: str = "E:\astrbot\小日记"
+    diary_storage: str = ""
     diary_reference_days: int = 2
     diary_auto_recall: bool = False
     diary_recall_time: int = 30
@@ -90,16 +95,29 @@ class PluginConfig(BaseModel):
     debug: bool = False
     # === 额外配置 ===
     observation_storage: str = ""
-    max_observations: int = 20
+    max_observations: int = 9
     interaction_frequency: int = 5
     image_quality: int = 70
-    system_prompt: str = "角色设定：窥屏助手\n把你正在使用的人格复制到这里"
+    system_prompt: str = "你需要想象自己真实地为了满足好奇心而偷偷查看了一眼用户的屏幕，然后与用户进行互动。"
     bot_appearance: str = ""  # Bot的外形描述，用于在屏幕中识别自己
 
     # === WebUI 管理界面 ===
     webui: WebuiConfig = Field(default_factory=WebuiConfig)
 
     # 验证器
+    @field_validator("screen_recognition_mode", mode="before")
+    @classmethod
+    def validate_screen_recognition_mode(cls, v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in {"recording", "video", "true", "1", "yes", "on"}:
+                return True
+            if normalized in {"screenshot", "image", "false", "0", "no", "off"}:
+                return False
+        return bool(v)
+
     @field_validator('check_interval')
     @classmethod
     def validate_check_interval(cls, v):
@@ -119,6 +137,25 @@ class PluginConfig(BaseModel):
     def validate_bot_vision_quality(cls, v):
         if v < 0 or v > 100:
             raise ValueError('bot_vision_quality 必须在 0-100 之间')
+        return v
+
+    @field_validator('recording_fps')
+    @classmethod
+    def validate_recording_fps(cls, v):
+        if isinstance(v, str):
+            try:
+                v = float(v)
+            except ValueError:
+                raise ValueError('recording_fps 必须是数字')
+        if v < 0.01 or v > 30:
+            raise ValueError('recording_fps 必须在 0.01-30 之间')
+        return v
+
+    @field_validator('recording_duration_seconds')
+    @classmethod
+    def validate_recording_duration_seconds(cls, v):
+        if v < 1 or v > 300:
+            raise ValueError('recording_duration_seconds 必须在 1-300 之间')
         return v
 
     @field_validator('image_quality')

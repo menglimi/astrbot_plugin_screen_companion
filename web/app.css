@@ -266,6 +266,50 @@ button { cursor: pointer; }
     gap: 18px;
 }
 
+.runtime-media-panel {
+    margin-top: 18px;
+}
+
+.runtime-media-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.runtime-media-card {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid rgba(97, 77, 64, 0.08);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.62);
+}
+
+.runtime-media-card h4 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.runtime-media-link {
+    text-decoration: none;
+}
+
+.runtime-media-frame {
+    overflow: hidden;
+    border-radius: 16px;
+    background: rgba(247, 241, 233, 0.88);
+    min-height: 220px;
+}
+
+.runtime-media-preview {
+    display: block;
+    width: 100%;
+    min-height: 220px;
+    max-height: 420px;
+    object-fit: contain;
+    background: rgba(42, 34, 29, 0.08);
+}
+
 .settings-grid {
     display: grid;
     grid-template-columns: minmax(240px, 0.58fr) minmax(0, 1.42fr);
@@ -806,7 +850,7 @@ button { cursor: pointer; }
 .error-text { color: var(--danger); min-height: 1.2em; }
 
 @media (max-width: 1080px) {
-.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form, .health-grid { grid-template-columns: 1fr; }
+.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form, .health-grid, .runtime-media-grid { grid-template-columns: 1fr; }
     .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 

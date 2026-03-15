@@ -95,19 +95,63 @@
       "enabled": true
     }
   },
+  "screen_recognition_mode": {
+    "description": "开启视频识别",
+    "type": "bool",
+    "hint": "开启后使用桌面录屏作为识别素材；关闭后使用当前截图作为识别素材。录屏模式会消耗更多的token但能让bot更好地识别你在做什么。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "ffmpeg_path": {
+    "description": "ffmpeg 可执行文件路径",
+    "type": "string",
+    "hint": "留空则自动查找。如填写，需填写 ffmpeg.exe 的绝对路径。ffmpeg 用于录屏，不下载则无法使用录屏模式。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
+  },
+  "recording_fps": {
+    "description": "录屏帧率",
+    "type": "float",
+    "hint": "录屏模式下每秒采样的帧数。支持小数，如 0.5 代表 2 秒/帧。非精细操作建议保持在默认值1。",
+    "default": 1,
+    "min": 0.01,
+    "max": 30,
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
+  },
+  "recording_duration_seconds": {
+    "description": "录屏时长（秒）",
+    "type": "int",
+    "hint": "每次录制桌面视频的时长。值越大越能保留完整操作过程，但会相对增加上传体积、耗时和 token 消耗。",
+    "default": 10,
+    "min": 1,
+    "max": 300,
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
+  },
   "capture_active_window": {
     "description": "只截取活动窗口",
     "type": "bool",
     "hint": "开启后只截取活动窗口，关闭则截取全屏（注：部分系统环境下活动窗口模式可能失效）。",
     "default": false,
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "screen_recognition_mode": false
     }
   },
   "bot_vision_quality": {
     "description": "Bot 近视程度",
     "type": "int",
-    "hint": "值越高看得越清楚，建议保持在80+",
+    "hint": "值越高看得越清楚（0-100），建议保持在85+",
     "default": 85,
     "min": 1,
     "max": 100,
@@ -127,12 +171,23 @@
     }
   },
   "use_external_vision": {
-    "description": "使用外接视觉API",
+    "description": "优先调用外部视觉API",
     "type": "bool",
-    "hint": "开启后，使用外接API进行视觉模型调用，而不是Astrbot自带的视觉模型。",
+    "hint": "开启后，先把截图或录屏发送给外部视觉 API 做识别，再把识别文本交给 AstrBot 回复；关闭后，会把图片或视频转成 base64 作为多模态消息直接发送给 AstrBot 当前 provider。",
     "default": true,
     "condition": {
       "enabled": true
+    }
+  },
+  "allow_unsafe_video_direct_fallback": {
+    "description": "允许兼容视频直发回退",
+    "type": "bool",
+    "hint": "仅在关闭外部视觉 API 且开启视频识别时生效。开启后，允许用户直接把录屏视频作为多模态消息发送给 AstrBot 当前 provider。这样可能导致请求体很大和 token 消耗明显增加，但实测似乎没太大变化，可以调低帧率和时长自己测一测。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "use_external_vision": false,
+      "screen_recognition_mode": true
     }
   },
   "vision_api_url": {
@@ -282,7 +337,7 @@
     "description": "日记存储路径",
     "type": "string",
     "hint": "日记文件的存储路径，留空则使用默认路径。",
-    "default": "E:\\astrbot\\小日记",
+    "default": "",
     "condition": {
       "enabled": true,
       "enable_diary": true
@@ -410,9 +465,9 @@
     }
   },
   "save_local": {
-    "description": "是否在本地保留截图",
+    "description": "是否在本地保留最近一次识别素材",
     "type": "bool",
-    "hint": "如果开启，最近一次截图将保存在 data 目录中。关闭则在发送给 AI 后立即删除，以节省空间。",
+    "hint": "截图模式下会保留最近一次截图；录屏模式下会保留最近一次 mp4，方便排查识别结果。",
     "default": true,
     "condition": {
       "enabled": true
@@ -433,7 +488,8 @@
     "hint": "主要用于 Docker 等无法直接截图的部署环境。开启后，插件会优先从共享目录读取截图；默认关闭，普通桌面环境建议保持关闭。",
     "default": false,
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "screen_recognition_mode": false
     }
   },
   "shared_screenshot_dir": {
@@ -443,7 +499,8 @@
     "default": "",
     "condition": {
       "enabled": true,
-      "use_shared_screenshot_dir": true
+      "use_shared_screenshot_dir": true,
+      "screen_recognition_mode": false
     }
   },
   "custom_tasks": {

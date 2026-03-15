@@ -152,6 +152,13 @@
                         </form>
                     </article>
                 </div>
+                <article class="panel runtime-media-panel">
+                    <div class="panel-header">
+                        <h3>最新素材预览</h3>
+                        <span class="panel-subtle" id="runtimeMediaMeta">等待加载</span>
+                    </div>
+                    <div class="runtime-media-grid" id="runtimeMedia"></div>
+                </article>
                 <article class="panel">
                     <div class="panel-header">
                         <div>
@@ -277,8 +284,9 @@
                             <span>全选当前页</span>
                         </label>
                         <div class="toolbar">
-                            <button class="ghost-button" id="clearSelectionButton" type="button">清空选择</button>
+                            <button class="ghost-button" id="clearSelectionsButton" type="button">清空选择</button>
                             <button class="ghost-button" id="deleteSelectedButton" type="button">删除选中</button>
+                            <button class="danger-button" id="clearAllDataButton" type="button">清空所有资料</button>
                         </div>
                     </div>
                     <div class="list-stack" id="observationList"></div>

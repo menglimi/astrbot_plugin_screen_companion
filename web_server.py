@@ -212,6 +212,7 @@ class WebServer:
         self.app.router.add_get("/api/observations", self.handle_list_observations)
         self.app.router.add_delete("/api/observations/{index}", self.handle_delete_observation)
         self.app.router.add_delete("/api/observations/batch", self.handle_batch_delete_observations)
+        self.app.router.add_post("/api/data/clear", self.handle_clear_all_data)
         self.app.router.add_get("/api/memories", self.handle_list_memories)
         self.app.router.add_get("/api/config", self.handle_get_config)
         self.app.router.add_get("/api/settings", self.handle_get_settings)
@@ -223,6 +224,7 @@ class WebServer:
         self.app.router.add_get("/api/windows", self.handle_list_windows)
         self.app.router.add_get("/api/activity", self.handle_get_activity_stats)
         self.app.router.add_get("/api/dashboard", self.handle_get_dashboard_stats)
+        self.app.router.add_get("/api/media/latest/{kind}", self.handle_get_latest_media)
         
         # 外部图片分析API
         self.app.router.add_post("/api/analyze", self.handle_analyze_image)
@@ -884,8 +886,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.5.4",
-                "plugin_version": "2.5.4"
+            "version": "2.6.0",
+            "plugin_version": "2.6.0"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -912,7 +914,10 @@ class WebServer:
         values = {}
 
         for key in schema.keys():
-            values[key] = getattr(self.plugin, key, None)
+            if key == "screen_recognition_mode":
+                values[key] = bool(self.plugin._use_screen_recording_mode())
+            else:
+                values[key] = getattr(self.plugin, key, None)
 
         webui_config = getattr(getattr(self.plugin, "plugin_config", None), "webui", None)
         if webui_config:
@@ -972,6 +977,10 @@ class WebServer:
                 "title": "识屏与视觉",
                 "description": "控制截图来源、视觉模型和识屏提示词。",
                 "fields": [
+                    "screen_recognition_mode",
+                    "ffmpeg_path",
+                    "recording_fps",
+                    "recording_duration_seconds",
                     "save_local",
                     "use_shared_screenshot_dir",
                     "shared_screenshot_dir",
@@ -979,6 +988,7 @@ class WebServer:
                     "image_quality",
                     "image_prompt",
                     "use_external_vision",
+                    "allow_unsafe_video_direct_fallback",
                     "vision_api_url",
                     "vision_api_key",
                     "vision_api_model",
@@ -1201,8 +1211,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-                "version": "2.5.4",
-                "plugin_version": "2.5.4",
+            "version": "2.6.0",
+            "plugin_version": "2.6.0",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1228,6 +1238,9 @@ class WebServer:
                 }
             )
 
+        latest_screenshot = self._build_latest_media_info("image")
+        latest_video = self._build_latest_media_info("video")
+
         return {
             "enabled": bool(getattr(self.plugin, "enabled", False)),
             "is_running": bool(getattr(self.plugin, "is_running", False)),
@@ -1248,6 +1261,8 @@ class WebServer:
             "enable_mic_monitor": bool(getattr(self.plugin, "enable_mic_monitor", False)),
             "debug": bool(getattr(self.plugin, "debug", False)),
             "save_local": bool(getattr(self.plugin, "save_local", False)),
+            "screen_recognition_mode": bool(self.plugin._use_screen_recording_mode()),
+            "use_external_vision": bool(getattr(self.plugin, "use_external_vision", True)),
             "use_shared_screenshot_dir": bool(getattr(self.plugin, "use_shared_screenshot_dir", False)),
             "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
             "enable_natural_language_screen_assist": bool(getattr(self.plugin, "enable_natural_language_screen_assist", False)),
@@ -1257,7 +1272,74 @@ class WebServer:
             "window_companion_active_title": getattr(self.plugin, "window_companion_active_title", "") or "",
             "diary_time": getattr(self.plugin, "diary_time", ""),
             "observation_count": len(getattr(self.plugin, "observations", []) or []),
+            "latest_screenshot": latest_screenshot,
+            "latest_video": latest_video,
             "presets": presets,
+        }
+
+    def _resolve_latest_media_path(self, kind: str) -> tuple[Path | None, str]:
+        plugin_data_dir = Path(getattr(self.plugin.plugin_config, "data_dir", Path.cwd()))
+
+        if kind == "image":
+            local_path = plugin_data_dir / "screen_shot_latest.jpg"
+            if local_path.is_file():
+                return local_path, "local_snapshot"
+
+            if bool(getattr(self.plugin, "use_shared_screenshot_dir", False)):
+                shared_dir = Path(str(getattr(self.plugin, "shared_screenshot_dir", "") or "").strip())
+                if shared_dir.is_dir():
+                    candidates: list[Path] = []
+                    for suffix in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
+                        candidates.extend(shared_dir.glob(suffix))
+                    if candidates:
+                        latest = max(candidates, key=lambda item: item.stat().st_mtime)
+                        return latest, "shared_directory"
+            return None, "missing"
+
+        if kind == "video":
+            local_path = plugin_data_dir / "screen_record_latest.mp4"
+            if local_path.is_file():
+                return local_path, "local_snapshot"
+
+            current_path = Path(str(getattr(self.plugin, "_screen_recording_path", "") or "").strip())
+            if current_path.is_file():
+                return current_path, "recording_cache"
+            return None, "missing"
+
+        return None, "invalid"
+
+    def _build_latest_media_info(self, kind: str) -> dict[str, Any]:
+        path, source = self._resolve_latest_media_path(kind)
+        if path is None:
+            message = (
+                "当前没有可预览的最新截图。"
+                if kind == "image"
+                else "当前没有可预览的最新录屏。"
+            )
+            if kind == "image" and not bool(getattr(self.plugin, "save_local", False)):
+                message = "未找到可预览的截图。可以开启素材留存，或使用共享截图目录模式。"
+            if kind == "video" and not bool(getattr(self.plugin, "save_local", False)):
+                message = "未找到可预览的录屏。建议开启素材留存后再查看最近录屏。"
+            return {
+                "available": False,
+                "kind": kind,
+                "url": "",
+                "updated_at": "",
+                "size_bytes": 0,
+                "source": source,
+                "message": message,
+            }
+
+        stat = path.stat()
+        return {
+            "available": True,
+            "kind": kind,
+            "url": f"/api/media/latest/{kind}?ts={int(stat.st_mtime)}",
+            "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "size_bytes": int(stat.st_size),
+            "source": source,
+            "message": "",
+            "filename": path.name,
         }
 
     def _build_activity_stats(self, activity_history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -1695,6 +1777,60 @@ class WebServer:
             logger.error(f"批量删除观察记录失败: {e}")
             return self._err(str(e))
 
+    async def handle_clear_all_data(self, request):
+        """清空所有资料（观察记录、学习数据、日记等）。"""
+        try:
+            payload = await request.json()
+            confirm = payload.get("confirm", False)
+            
+            if not confirm:
+                return self._err("需要确认才能清空资料", 400)
+            
+            cleared_items = []
+            
+            # 清空观察记录
+            if hasattr(self.plugin, "observations"):
+                obs_count = len(self.plugin.observations or [])
+                self.plugin.observations = []
+                self.plugin._save_observations()
+                if obs_count > 0:
+                    cleared_items.append(f"观察记录({obs_count}条)")
+            
+            # 清空学习数据
+            if hasattr(self.plugin, "learning_data"):
+                self.plugin.learning_data = {}
+                self.plugin._save_learning_data()
+                cleared_items.append("学习数据")
+            
+            # 清空长期记忆
+            if hasattr(self.plugin, "long_term_memory"):
+                self.plugin.long_term_memory = {}
+                self.plugin._save_long_term_memory()
+                cleared_items.append("长期记忆")
+            
+            # 清空纠正数据
+            if hasattr(self.plugin, "corrections"):
+                self.plugin.corrections = {}
+                self.plugin._save_corrections()
+                cleared_items.append("纠正数据")
+            
+            # 清空日记
+            if hasattr(self.plugin, "diary_entries"):
+                diary_count = len(self.plugin.diary_entries or [])
+                self.plugin.diary_entries = []
+                if diary_count > 0:
+                    cleared_items.append(f"日记({diary_count}条)")
+            
+            logger.info(f"用户清空了以下资料: {', '.join(cleared_items)}")
+            
+            return self._ok({
+                "cleared": cleared_items,
+                "message": f"已清空: {', '.join(cleared_items)}"
+            })
+        except Exception as e:
+            logger.error(f"清空资料失败: {e}")
+            return self._err(str(e))
+
     async def handle_analyze_image(self, request):
         """通过文件上传分析图片"""
         try:
@@ -1726,6 +1862,20 @@ class WebServer:
             
         except Exception as e:
             logger.error(f"图片分析失败: {e}")
+            return self._err(str(e))
+
+    async def handle_get_latest_media(self, request):
+        kind = str(request.match_info.get("kind", "") or "").strip().lower()
+        if kind not in {"image", "video"}:
+            return self._err("Unsupported media kind", 400)
+
+        try:
+            path, _ = self._resolve_latest_media_path(kind)
+            if path is None or not path.is_file():
+                return self._err("Latest media is not available", 404)
+            return web.FileResponse(path=path)
+        except Exception as e:
+            logger.error(f"读取最新{kind}预览失败: {e}")
             return self._err(str(e))
 
     async def handle_analyze_image_base64(self, request):

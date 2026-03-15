@@ -1,37 +1,75 @@
 # 我会一直看着你（`astrbot_plugin_screen_companion`）
 
-面向 AstrBot 的屏幕伴侣插件。它会结合截图分析、环境感知、长期记忆、日记记录和 WebUI，为用户提供更自然、更有价值的陪伴式互动体验。
-
-<br />
-
-明天给大女儿过生日，应该不会更新。
+面向 AstrBot 的屏幕伴侣插件。它会结合截图或录屏、多模态识别、环境感知、长期记忆、日记和 WebUI，为用户提供更自然的陪伴式互动。
 
 ## 主要功能
 
-- **自动截图观察**：按设定间隔和触发概率分析当前屏幕
-- **观察去重和低价值过滤**：减少流水账和噪音记忆
-- **自然语言识屏求助**：支持"帮我看看这题/这局/这个页面"等自然语言请求
-- **长期记忆和日记系统**：支持持续积累、压缩和按天回顾
-- **WebUI 管理面板**：支持查看运行状态、日记、观察记录、长期记忆和配置
-- **Docker 共享截图目录适配**：默认关闭，普通桌面环境优先实时截图
-- **窗口自动陪伴**：可指定窗口关键字，窗口出现时自动把 Bot 叫来，关闭时自动退出
-- **观察模式**：支持"偷看"和"陪伴"两种模式，陪伴模式提供更沉浸式的体验
-- **工作/娱乐时间统计**：记录用户工作和娱乐的时间分布
-- **活动统计**：WebUI 新增活动统计功能，展示用户的屏幕活动情况
+- 自动识屏：按设定间隔和触发概率分析当前屏幕内容。
+- 识别素材开关：关闭时识别图片，开启时识别视频。
+- 识别链路切换：支持“外部视觉 API 两步识别”和“直接发送给 AstrBot 的多模态识别”。
+- 自然语言识屏求助：支持“帮我看看这个页面”“这题怎么做”等自然语言触发。
+- 长期记忆与日记：记录观察、压缩记忆，并按天生成日记。
+- WebUI 管理面板：查看运行状态、观察记录、活动统计、日记和配置。
+- Docker / 共享目录适配：无法直接截图时可切换到共享截图目录模式。
+- 窗口自动陪伴：命中特定窗口时自动触发陪伴与识屏。
 
 ## 运行环境
 
-推荐在带图形界面的桌面环境中使用：
+推荐在有图形界面的桌面环境中使用：
 
 - Windows
 - macOS
 - Linux 图形桌面
 
-需要具备：
+额外要求：
 
-- 屏幕截图权限
-- 如启用麦克风监听，需要麦克风权限
-- 已正确配置视觉模型或外部视觉 API
+- 截图模式需要桌面截图权限。
+- 录屏模式目前主要面向 Windows，且需要可用的 `ffmpeg`。
+- `ffmpeg` 是一个开源的多媒体处理工具，用于录制桌面视频。
+- 如不下载 ffmpeg，则无法使用**录屏模式**（`screen_recognition_mode`），只能使用截图模式。
+
+## ffmpeg 安装（录屏模式必需）
+
+### Windows 快速配置（推荐）
+
+1. 下载 ffmpeg：
+   - 访问 https://www.gyan.dev/ffmpeg/builds/（推荐）
+   - 下载 `ffmpeg-release-essentials.zip`
+
+2. 解压下载的 ZIP 文件
+
+3. 使用指令自动配置：
+   ```
+   /kpi ffmpeg [解压后的 ffmpeg.exe 路径]
+   ```
+   例如：`/kpi ffmpeg C:\Users\你的用户名\Downloads\ffmpeg\bin\ffmpeg.exe`
+   
+   插件会自动将 ffmpeg 复制到插件目录的 bin 文件夹。
+
+### 手动配置
+
+将 `ffmpeg.exe` 复制到以下位置之一：
+- 插件目录：`astrbot_plugin_screen_companion/bin/ffmpeg.exe`
+- 或配置 `ffmpeg_path` 为完整路径
+
+### macOS 安装步骤
+
+```bash
+brew install ffmpeg
+```
+
+### Linux 安装步骤
+
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# CentOS/RHEL
+sudo yum install ffmpeg
+```
+
+- 如启用麦克风监听，需要对应麦克风权限。
+- 如使用外部视觉 API，需要正确配置视觉模型地址、密钥和模型名。
 
 ## 安装
 
@@ -41,19 +79,68 @@
 git clone https://github.com/menglimi/astrbot_plugin_screen_companion.git
 ```
 
-1. 将插件目录放入 AstrBot 插件目录，例如：
+2. 将插件目录放入 AstrBot 插件目录，例如：
 
 ```text
 C:\Users\你的用户名\.astrbot\data\plugins\
 ```
 
-1. 安装依赖
+3. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-1. 重启 AstrBot
+4. 重启 AstrBot
+
+## 如何从零放置 `ffmpeg.exe` 到 `bin/ffmpeg.exe`
+
+如果你想直接使用插件内置查找路径，而不是自己配置系统 `PATH`，可以按下面的步骤处理：
+
+1. 下载 Windows 版 ffmpeg 压缩包。
+   - 可从 ffmpeg 官网跳转的 Windows 构建页下载。
+   - 下载内容通常是一个 `.zip` 或 `.7z` 压缩包。
+2. 解压压缩包。
+3. 在解压后的目录中找到 `ffmpeg.exe`。
+   - 常见位置类似：`解压目录\\bin\\ffmpeg.exe`
+4. 进入本插件目录，在插件根目录下确认有一个 `bin` 文件夹。
+   - 如果没有，就手动新建一个 `bin` 文件夹。
+5. 把刚才找到的 `ffmpeg.exe` 复制到这个位置：
+
+```text
+插件目录\bin\ffmpeg.exe
+```
+
+例如，如果你的插件目录是：
+
+```text
+C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_screen_companion
+```
+
+那么最终文件应该放在：
+
+```text
+C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_screen_companion\bin\ffmpeg.exe
+```
+
+放好后的目录结构大致如下：
+
+```text
+astrbot_plugin_screen_companion/
+├─ bin/
+│  └─ ffmpeg.exe
+├─ core/
+├─ web/
+├─ main.py
+└─ README.md
+```
+
+完成后重启 AstrBot，再执行一次 `/kpr` 或切换到录屏模式即可。如果仍提示未找到 `ffmpeg`，请先确认：
+
+- 文件名确实是 `ffmpeg.exe`
+- 文件确实放在 `bin` 文件夹里，而不是压缩包的其他子目录里
+- AstrBot 已经重启，拿到了最新文件
+- 你下载的是 Windows 可执行文件，而不是源码包
 
 ## 依赖
 
@@ -64,222 +151,122 @@ pip install -r requirements.txt
 - `aiohttp`
 - `psutil`
 - `numpy`
-- `pyaudio`（启用麦克风监听时）
-- `pygetwindow`（Windows 活动窗口支持）
+- `pyaudio`：仅在启用麦克风监听时需要
+- `pygetwindow`：Windows 活动窗口识别时需要
+- `ffmpeg`：录屏模式需要
 
-## 观察模式
+## 识别素材开关
 
-### 偷看模式
+### `screen_recognition_mode = false`
 
-- 系统默认模式
-- 适用于偶尔观察用户屏幕的场景
-- 提供简洁、客观的屏幕分析
+- 使用当前截图作为识别素材。
+- 适合普通桌面环境。
+- 兼容性最好。
 
-### 陪伴模式
+### `screen_recognition_mode = true`
 
-- 更注重对话的连续性和陪伴的沉浸感
-- 为特定窗口提供专属陪伴
-- 提供更贴心的建议和鼓励
-- 营造沉浸式的陪伴体验
+- 本地通过 `ffmpeg` 录制最近一段桌面 mp4。
+- 触发对话时停止当前录制，读取最近一段视频并重新开始下一轮录制。
+- 适合需要让模型理解连续操作过程的场景。
+- 默认录屏参数为 `1 fps`、`10 秒`，也可以通过 `recording_fps` 和 `recording_duration_seconds` 调整。
+
+## 识别链路
+
+### `use_external_vision = true`
+
+两步识别链路：
+
+1. 本地准备截图或录屏素材。
+2. 发送给外部视觉 API 获取识别文本。
+3. 再把识别文本和对话上下文交给 AstrBot 生成回复。
+
+适合当前 AstrBot provider 多模态兼容性不稳定，或者希望单独使用视觉模型时。
+
+### `use_external_vision = false`
+
+直接多模态链路：
+
+1. 本地准备截图或录屏素材。
+2. 把图片或视频转成 base64。
+3. 作为多模态消息直接发送给 AstrBot 当前 provider。
+
+注意：
+
+- 图片直发通常更稳。
+- 视频直发依赖当前 provider 是否真正支持 `data:video/mp4;base64,...` 形式的输入。
+- 如果当前聊天 provider 是官方 Gemini API，插件现在会优先改走 Gemini 原生多模态接口：
+  - 图片走 `inline_data`
+  - 视频优先走 Gemini `Files API`
+- 如果当前 provider 只是 OpenAI 兼容网关上的 Gemini 模型，插件会回退到原有的兼容模式，不会强行调用 Google 的原生上传接口。
+- 默认情况下，非 Gemini 原生链路上的视频直发会被安全拦截，以避免请求体过大和 token 消耗失控。
+- 如果你确实要强制继续兼容视频直发，可以开启 `allow_unsafe_video_direct_fallback`，但风险需要自行承担。
+- 为避免把整段视频 base64 直接塞进提示词导致请求体和 token 风险暴涨，视频直发现在默认只允许走 Gemini 原生上传；不满足条件时会直接中断并提醒切换方案。
+- 如需强制启用官方 Gemini 原生链路，可通过环境变量提供：
+  - `GEMINI_API_KEY`
+  - `GEMINI_API_BASE`，默认是 `https://generativelanguage.googleapis.com`
 
 ## 常用指令
 
-| 指令                           | 说明            |
-| ---------------------------- | ------------- |
-| `/kp`                        | 立即截图并分析当前屏幕   |
-| `/kps`                       | 切换自动观察状态      |
-| `/kpi start`                 | 启动自动观察任务      |
-| `/kpi stop`                  | 停止自动观察任务      |
-| `/kpi list`                  | 查看当前运行中的自动任务  |
-| `/kpi y [序号] [间隔] [概率]`      | 新增或修改自定义预设    |
-| `/kpi ys [序号]`               | 切换到指定预设       |
-| `/kpi presets`               | 查看全部预设        |
-| `/kpi add [间隔] [提示词]`        | 新增一个自定义观察任务   |
-| `/kpi diary [YYYY-MM-DD]`    | 查看指定日期日记      |
-| `/kpi recent [天数]`           | 查看最近几天日记      |
-| `/kpi complete [YYYY-MM-DD]` | 补写指定日期日记      |
-| `/kpi debug [on/off]`        | 切换调试模式        |
-| `/kpi webui [start/stop]`    | 启动或停止 WebUI   |
-| `/kpi webui`                 | 查看 WebUI 端口信息 |
+| 指令 | 说明 |
+| --- | --- |
+| `/kp` | 始终执行一次截图识别，不受全局录屏开关影响 |
+| `/kpr` | 始终执行一次录屏识别，不受全局录屏开关影响 |
+| `/kps` | 切换自动观察状态 |
+| `/kpi start` | 启动自动观察任务 |
+| `/kpi stop` | 停止自动观察任务 |
+| `/kpi list` | 查看当前自动任务 |
+| `/kpi presets` | 查看全部预设 |
+| `/kpi webui` | 查看 WebUI 端口信息 |
+| `/kpi webui start` | 启动 WebUI |
+| `/kpi webui stop` | 停止 WebUI |
+| `/kpi ffmpeg` | 查看当前 ffmpeg 状态 |
+| `/kpi ffmpeg [路径]` | 设置 ffmpeg 路径并自动复制到插件目录 |
 
-## 外部 API 调用
+## 推荐关注的配置项
 
-插件提供了外部 API 接口，允许其他应用程序调用屏幕分析功能。
-
-### 前提条件
-
-1. 启用 WebUI
-2. 开启"允许外部 API 调用"
-3. 设置 WebUI 密码
-
-### API 接口
-
-#### 文件上传接口
-
-```http
-POST /api/analyze
-```
-
-**请求参数**：
-
-- `file`：要分析的图片文件
-- `prompt`：可选，自定义提示词
-- `scene`：可选，指定场景类型
-
-**响应**：
-
-- `success`：布尔值，表示请求是否成功
-- `result`：分析结果
-- `error`：错误信息（如果失败）
-
-#### Base64 接口
-
-```http
-POST /api/analyze/base64
-```
-
-**请求参数**：
-
-- `image`：Base64 编码的图片数据
-- `prompt`：可选，自定义提示词
-- `scene`：可选，指定场景类型
-
-**响应**：
-
-- `success`：布尔值，表示请求是否成功
-- `result`：分析结果
-- `error`：错误信息（如果失败）
-
-#### 活动统计接口
-
-```http
-GET /api/activity
-```
-
-**响应**：
-
-- `success`：布尔值，表示请求是否成功
-- `data`：活动统计数据
-  - `work_time`：工作时间（分钟）
-  - `play_time`：娱乐时间（分钟）
-  - `total_time`：总时间（分钟）
-  - `activities`：活动详情列表
-- `error`：错误信息（如果失败）
-
-### 认证
-
-所有 API 调用都需要在请求头中包含认证信息：
-
-```http
-Authorization: Bearer <token>
-```
-
-其中 `<token>` 是通过登录接口获取的认证令牌。
-
-### 登录接口
-
-```http
-POST /api/auth/login
-```
-
-**请求参数**：
-
-- `username`：用户名（固定为 `admin`）
-- `password`：WebUI 密码
-
-**响应**：
-
-- `success`：布尔值，表示登录是否成功
-- `token`：认证令牌（如果成功）
-- `error`：错误信息（如果失败）
-
-## 2.5.3 更新摘要
-
-- **新增共同经历记忆**：Bot 现在会记录用户明确提到的“和 Bot 一起看过/玩过/做过”的共同经历，并在后续互动中谨慎引用
-- **升级统计看板**：WebUI 新增表格化统计看板，集中展示活动时间、观察场景、记忆分类和高优先级记忆
-- **新增时间范围筛选**：统计看板支持今天、近 7 天、近 30 天、全部时间，以及自定义起止日期
-- **优化开始/结束回复**：开始和结束任务的 LLM 回复会更明确地应用人格约束，减少机械式播报感
-- **统一版本信息**：插件元数据、WebUI 配置接口和健康检查接口统一更新到 `2.5.3`
-
-## 2.5.1 更新摘要
-
-- **修复窗口变化检测**：解决 `window_change_cooldown` 属性缺失导致的任务异常
-- **优化观察模式**：新增"陪伴"模式，提供更沉浸式的体验
-- **改进提示词系统**：优化 LLM 提示词顺序，提高回复速度和对话连贯性
-- **删除突兀语气词**：移除影响体验的情感词汇，提升对话流畅度
-- **扩展场景识别**：增加对英雄联盟等游戏的识别
-- **修复长期记忆**：解决将"未知"当做记忆因素的问题
-- **增加活动统计**：WebUI 新增活动统计功能，展示用户屏幕活动情况
-- **优化端口管理**：实现端口复用，解决插件重启时的端口占用问题
-- **改进自然语言识别**：更好地识别用户的自然语言请求
-- **修复中文编码**：解决 WebUI 中的中文乱码问题
-- **增加窗口变化检测**：监听用户打开新界面的行为，新窗口持续存在3分钟才记录
-- **记录工作/娱乐时间**：根据场景类型统计用户的工作和娱乐时间
-
-## 提示词系统
-
-插件采用两阶段提示词系统：
-
-1. **第一阶段**：视觉分析提示词，用于分析屏幕截图内容
-2. **第二阶段**：互动提示词，与识屏结果一起发送给 LLM，生成自然的人格化回复
-
-详细的提示词配置和说明请参考 `llm_prompts.md` 文件。
-
-## 配置建议
-
-优先关注以下配置项：
-
-- `enabled`
+- `screen_recognition_mode`
+- `ffmpeg_path`
+- `recording_fps`
+- `recording_duration_seconds`
+- `use_external_vision`
+- `allow_unsafe_video_direct_fallback`
+- `vision_api_url`
+- `vision_api_key`
+- `vision_api_model`
+- `use_shared_screenshot_dir`
+- `shared_screenshot_dir`
+- `save_local`
+- `enable_natural_language_screen_assist`
+- `enable_window_companion`
+- `window_companion_targets`
 - `check_interval`
 - `trigger_probability`
 - `active_time_range`
 - `rest_time_range`
-- `vision_api_url`
-- `vision_api_key`
-- `vision_api_model`
-- `enable_diary`
-- `diary_time`
-- `enable_learning`
-- `custom_presets`
-- `enable_window_companion`
-- `window_companion_targets`
-- `webui.enabled`
-- `webui.port`
-- `webui.auth_enabled`
-- `webui.allow_external_api`
-- `bot_appearance`（Bot 外形描述，用于识别屏幕中的自己）
-- `companion_prompt`（陪伴模式系统提示词）
 
 ## 隐私与安全
 
-该插件会读取屏幕内容，并可能将图片与文本发送给外部模型服务。请务必注意：
+该插件会读取屏幕内容，并可能把图片、视频或识别文本发送给外部模型服务。使用前请务必确认：
 
-- 不要在未获授权的环境中使用
-- 不要用于监控他人或侵犯隐私
-- 谨慎配置外部 API 地址和密钥
-- 如开放外部 API，请务必启用认证
+- 不要在未授权环境中使用。
+- 不要用于监控他人或侵犯隐私。
+- 谨慎配置外部视觉 API 地址和密钥。
+- 如果开放 WebUI 外部 API，请务必启用认证。
 
-## 开发维护
+## 开发建议
 
-建议所有源码文件统一使用 `UTF-8` 编码。仓库已提供 `.editorconfig` 约束常见编辑器行为。
-
-提交前可以运行：
+建议项目文件统一使用 `UTF-8` 编码。提交前可以运行：
 
 ```bash
 python scripts/check_text_health.py --strict
 ```
 
-这个脚本会检查：
+## 2.6.0 更新摘要
 
-- 非 `UTF-8` 编码文件
-- 常见乱码片段
-- 遗留的占位文本与可疑问号占位
-
-## 开发者信息
-
-开发者：menglimi（烛雨）
-
-qq：995051631
-
-写点什么：什么什么什么
-    喜欢的话可以给我点个小星星,有好的建议可以告诉我
+- 识别素材能力完成升级：新增截图 / 录屏开关，录屏模式支持本地 `ffmpeg` 采集最近一段桌面视频，并可通过 `recording_fps` 与 `recording_duration_seconds` 调整帧率和时长，默认值为 `1 fps`、`10 秒`。
+- 指令语义更加清晰：`/kp` 固定执行截图识别，`/kpr` 固定执行录屏识别，不再受全局识别素材开关影响；当当前处于截图模式时，`/kpr` 也会先临时录制一段桌面后再继续分析。
+- 多模态链路更完整：`use_external_vision` 现在可在“外部视觉 API 两步识别”和“直接发送给 AstrBot 的多模态识别”之间切换；当当前 provider 是官方 Gemini API 时，图片会优先走 `inline_data`，视频会优先走 `Files API`。
+- 视频直发安全策略增强：默认会拦截不支持原生视频上传的 provider，避免把整段视频 base64 直接塞进兼容消息导致请求体和 token 风险过大；如确有需要，可通过 `allow_unsafe_video_direct_fallback` 显式放开兼容回退。
+- 录屏环境配置更灵活：支持通过 `ffmpeg_path` 指定本地 `ffmpeg.exe`，同时会优先查找插件目录下的 `bin/ffmpeg.exe`，最后再回退到系统 `PATH`。
+- WebUI 能力继续扩展：运行状态页新增最新截图 / 最新录屏预览，并补充了识屏模式、识别链路和运行态说明，方便直接确认当前素材来源和多模态工作方式。
+- 运行时稳定性得到修复：补充统一的运行时状态兜底初始化，降低插件热更新或旧实例复用时因新字段缺失导致的 `AttributeError` 风险。

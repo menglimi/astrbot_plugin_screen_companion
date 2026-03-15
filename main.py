@@ -6,10 +6,12 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any
 
 DEFAULT_SYSTEM_PROMPT = """
@@ -28,6 +30,13 @@ from .core.config import PluginConfig
 
 class ScreenCompanion(Star):
     DEFAULT_WEBUI_PORT = 6314
+    SCREENSHOT_MODE = "screenshot"
+    RECORDING_MODE = "recording"
+    RECORDING_FPS = 1.0
+    RECORDING_DURATION_SECONDS = 10
+    GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
+    GEMINI_FILE_POLL_TIMEOUT_SECONDS = 120
+    GEMINI_FILE_POLL_INTERVAL_SECONDS = 2
 
     def __init__(self, context: Context, config: dict):
         import os
@@ -43,6 +52,11 @@ class ScreenCompanion(Star):
         self.task_counter = 0
         self.running = True
         self.background_tasks = []
+        self._screen_recording_lock = asyncio.Lock()
+        self._screen_recording_process = None
+        self._screen_recording_path = ""
+        self._recording_audio_device = None
+        self._recording_ffmpeg_path = None
         self.state = "inactive"  # active, inactive, temporary
         self.temporary_tasks = {}
         # 固定自动观察任务 ID
@@ -162,6 +176,11 @@ class ScreenCompanion(Star):
         self._is_stopping = False
         self._screen_assist_cooldowns = {}
         self.last_shared_activity_invite_time = 0.0
+        if self._use_screen_recording_mode():
+            self._safe_create_task(
+                self._ensure_recording_ready(),
+                name="screen_recording_bootstrap",
+            )
 
     def _sync_all_config(self) -> None:
         """将配置对象同步到插件运行时字段。"""
@@ -176,8 +195,33 @@ class ScreenCompanion(Star):
         self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。')
         self.capture_active_window = self.plugin_config.capture_active_window
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
+        self.screen_recognition_mode = self._normalize_screen_recognition_mode(
+            getattr(
+                self.plugin_config,
+                "screen_recognition_mode",
+                self.SCREENSHOT_MODE,
+            )
+        )
         self.image_prompt = self.plugin_config.image_prompt
+        self.ffmpeg_path = getattr(self.plugin_config, "ffmpeg_path", "")
+        self.recording_fps = max(
+            0.01, float(getattr(self.plugin_config, "recording_fps", self.RECORDING_FPS) or self.RECORDING_FPS)
+        )
+        self.recording_duration_seconds = max(
+            1,
+            int(
+                getattr(
+                    self.plugin_config,
+                    "recording_duration_seconds",
+                    self.RECORDING_DURATION_SECONDS,
+                )
+                or self.RECORDING_DURATION_SECONDS
+            ),
+        )
         self.use_external_vision = self.plugin_config.use_external_vision
+        self.allow_unsafe_video_direct_fallback = getattr(
+            self.plugin_config, "allow_unsafe_video_direct_fallback", False
+        )
         self.vision_api_url = self.plugin_config.vision_api_url
         self.vision_api_key = self.plugin_config.vision_api_key
         self.vision_api_model = self.plugin_config.vision_api_model
@@ -433,6 +477,7 @@ class ScreenCompanion(Star):
 
     async def _start_window_companion_session(self, window_title: str, rule: dict) -> bool:
         """Start automatic companion mode for a matched window."""
+        self._ensure_runtime_state()
         if not self.enabled or not self.enable_window_companion:
             return False
         if self._is_window_companion_session_active():
@@ -472,6 +517,7 @@ class ScreenCompanion(Star):
 
     async def _stop_window_companion_session(self, reason: str = "window_closed") -> bool:
         """Stop the automatic companion session for the matched window."""
+        self._ensure_runtime_state()
         task_id = getattr(self, "WINDOW_COMPANION_TASK_ID", "")
         task = (getattr(self, "auto_tasks", {}) or {}).get(task_id)
         if not task and not getattr(self, "window_companion_active_title", ""):
@@ -513,6 +559,7 @@ class ScreenCompanion(Star):
 
     async def _window_companion_task(self):
         """Watch configured windows and start or stop companion sessions automatically."""
+        self._ensure_runtime_state()
         while self.running:
             interval = max(2, int(getattr(self, "window_companion_check_interval", 5) or 5))
             try:
@@ -581,6 +628,7 @@ class ScreenCompanion(Star):
         return old_state != self._snapshot_webui_runtime()
 
     async def _restart_webui(self) -> None:
+        self._ensure_runtime_state()
         webui_lock = getattr(self, "_webui_lock", None)
         if webui_lock is None:
             self._webui_lock = asyncio.Lock()
@@ -666,6 +714,9 @@ class ScreenCompanion(Star):
             # 使用配置服务更新配置
             if self.plugin_config:
                 old_webui_state = self._snapshot_webui_runtime()
+                old_recognition_mode = self._normalize_screen_recognition_mode(
+                    getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
+                )
                 self._apply_plugin_config_updates(config_dict)
 
                 self._sync_all_config()
@@ -683,6 +734,15 @@ class ScreenCompanion(Star):
 
                 if self._is_webui_runtime_changed(old_webui_state):
                     self._safe_create_task(self._restart_webui(), name="restart_webui")
+
+                new_recognition_mode = self._normalize_screen_recognition_mode(
+                    getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
+                )
+                if old_recognition_mode != new_recognition_mode:
+                    self._safe_create_task(
+                        self._handle_screen_recognition_mode_change(),
+                        name="switch_screen_recognition_mode",
+                    )
 
                 logger.debug("配置更新完成")
         except Exception as e:
@@ -722,6 +782,421 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.error(f"等待{label}停止时出错: {e}")
 
+    def _normalize_screen_recognition_mode(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return self.RECORDING_MODE if value else self.SCREENSHOT_MODE
+
+        if isinstance(value, str):
+            mode = value.strip().lower()
+            if mode in {self.RECORDING_MODE, "video", "true", "1", "yes", "on"}:
+                return self.RECORDING_MODE
+            if mode in {self.SCREENSHOT_MODE, "image", "false", "0", "no", "off"}:
+                return self.SCREENSHOT_MODE
+
+        return self.SCREENSHOT_MODE
+
+    def _use_screen_recording_mode(self) -> bool:
+        return (
+            self._normalize_screen_recognition_mode(
+                getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
+            )
+            == self.RECORDING_MODE
+        )
+
+    async def _handle_screen_recognition_mode_change(self) -> None:
+        self._ensure_runtime_state()
+        if self._use_screen_recording_mode():
+            await self._ensure_recording_ready()
+            return
+        await self._stop_recording_if_running()
+
+    def _ensure_runtime_state(self) -> None:
+        if not hasattr(self, "auto_tasks") or self.auto_tasks is None:
+            self.auto_tasks = {}
+        if not hasattr(self, "temporary_tasks") or self.temporary_tasks is None:
+            self.temporary_tasks = {}
+        if not hasattr(self, "background_tasks") or self.background_tasks is None:
+            self.background_tasks = []
+        if not hasattr(self, "active_tasks") or self.active_tasks is None:
+            self.active_tasks = {}
+        if not hasattr(self, "last_task_execution") or self.last_task_execution is None:
+            self.last_task_execution = {}
+        if not hasattr(self, "task_counter"):
+            self.task_counter = 0
+        if not hasattr(self, "is_running"):
+            self.is_running = False
+        if not hasattr(self, "running"):
+            self.running = True
+        if not hasattr(self, "state"):
+            self.state = "inactive"
+        if not hasattr(self, "web_server"):
+            self.web_server = None
+        if not hasattr(self, "task_semaphore") or self.task_semaphore is None:
+            self.task_semaphore = asyncio.Semaphore(2)
+        if not hasattr(self, "task_queue") or self.task_queue is None:
+            self.task_queue = asyncio.Queue()
+        if not hasattr(self, "_shutdown_lock") or self._shutdown_lock is None:
+            self._shutdown_lock = asyncio.Lock()
+        if not hasattr(self, "_webui_lock") or self._webui_lock is None:
+            self._webui_lock = asyncio.Lock()
+        if not hasattr(self, "_is_stopping"):
+            self._is_stopping = False
+        if not hasattr(self, "_screen_assist_cooldowns") or self._screen_assist_cooldowns is None:
+            self._screen_assist_cooldowns = {}
+        if not hasattr(self, "last_shared_activity_invite_time"):
+            self.last_shared_activity_invite_time = 0.0
+        if not hasattr(self, "previous_windows") or self.previous_windows is None:
+            self.previous_windows = set()
+        if not hasattr(self, "window_change_cooldown"):
+            self.window_change_cooldown = 0
+        if not hasattr(self, "window_timestamps") or self.window_timestamps is None:
+            self.window_timestamps = {}
+        if not hasattr(self, "window_companion_active_title"):
+            self.window_companion_active_title = ""
+        if not hasattr(self, "window_companion_active_target"):
+            self.window_companion_active_target = ""
+        if not hasattr(self, "window_companion_active_rule") or self.window_companion_active_rule is None:
+            self.window_companion_active_rule = {}
+        self._ensure_recording_runtime_state()
+
+    def _ensure_recording_runtime_state(self) -> None:
+        if not hasattr(self, "_screen_recording_lock") or self._screen_recording_lock is None:
+            self._screen_recording_lock = asyncio.Lock()
+        if not hasattr(self, "_screen_recording_process"):
+            self._screen_recording_process = None
+        if not hasattr(self, "_screen_recording_path"):
+            self._screen_recording_path = ""
+        if not hasattr(self, "_recording_audio_device"):
+            self._recording_audio_device = None
+        if not hasattr(self, "_recording_ffmpeg_path"):
+            self._recording_ffmpeg_path = None
+
+    def _get_recording_fps(self) -> float:
+        return max(0.01, float(getattr(self, "recording_fps", self.RECORDING_FPS) or self.RECORDING_FPS))
+
+    def _get_recording_duration_seconds(self) -> int:
+        return max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "recording_duration_seconds",
+                    self.RECORDING_DURATION_SECONDS,
+                )
+                or self.RECORDING_DURATION_SECONDS
+            ),
+        )
+
+    def _get_ffmpeg_path(self) -> str:
+        self._ensure_recording_runtime_state()
+        cached_path = getattr(self, "_recording_ffmpeg_path", None)
+        if cached_path and os.path.exists(cached_path):
+            return cached_path
+
+        candidate_paths: list[str] = []
+
+        configured_path = str(getattr(self, "ffmpeg_path", "") or "").strip()
+        if configured_path:
+            candidate_paths.append(configured_path)
+
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate_paths.extend(
+            [
+                os.path.join(plugin_dir, "bin", "ffmpeg.exe"),
+                os.path.join(plugin_dir, "bin", "ffmpeg"),
+                os.path.join(plugin_dir, "ffmpeg.exe"),
+                os.path.join(plugin_dir, "ffmpeg"),
+            ]
+        )
+
+        for candidate in candidate_paths:
+            normalized = os.path.abspath(os.path.expanduser(candidate))
+            if os.path.isfile(normalized):
+                self._recording_ffmpeg_path = normalized
+                return normalized
+
+        ffmpeg_path = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe") or ""
+        self._recording_ffmpeg_path = ffmpeg_path or None
+        return ffmpeg_path
+
+    def _get_recording_cache_dir(self) -> str:
+        cache_dir = os.path.join(str(self.plugin_config.data_dir), "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+
+    def _detect_system_audio_device(self) -> str | None:
+        if sys.platform != "win32":
+            return None
+        if self._recording_audio_device is not None:
+            return self._recording_audio_device
+
+        import re
+
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            self._recording_audio_device = ""
+            return self._recording_audio_device
+
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ]
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=10,
+                creationflags=creationflags,
+            )
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        except Exception as e:
+            logger.debug(f"检测系统音频设备失败: {e}")
+            self._recording_audio_device = ""
+            return self._recording_audio_device
+
+        keywords = ("立体声混音", "stereo mix", "realtek")
+        matched_devices: list[str] = []
+        for line in output.splitlines():
+            lower_line = line.lower()
+            if not any(keyword in lower_line for keyword in keywords):
+                continue
+            match = re.search(r'"([^"]+)"', line)
+            if match:
+                matched_devices.append(match.group(1))
+
+        self._recording_audio_device = matched_devices[0] if matched_devices else ""
+        if self._recording_audio_device:
+            logger.info(f"检测到系统音频设备: {self._recording_audio_device}")
+        else:
+            logger.info("未检测到可用的系统音频设备，将仅录制桌面画面")
+        return self._recording_audio_device
+
+    def _cleanup_recording_cache(self, keep_latest: int = 3) -> None:
+        try:
+            cache_dir = self._get_recording_cache_dir()
+            candidates = []
+            for filename in os.listdir(cache_dir):
+                if not filename.startswith("rec_") or not filename.endswith(".mp4"):
+                    continue
+                path = os.path.join(cache_dir, filename)
+                try:
+                    candidates.append((os.path.getmtime(path), path))
+                except OSError:
+                    continue
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            for _, path in candidates[keep_latest:]:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.debug(f"清理录屏缓存失败: {e}")
+
+    def _record_screen_clip_sync(self, duration_seconds: int) -> str:
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            raise RuntimeError(
+                "\u672a\u627e\u5230 ffmpeg\uff0c\u8bf7\u5c06 ffmpeg.exe \u653e\u5230\u63d2\u4ef6\u76ee\u5f55\u4e0b\u7684 bin \u6587\u4ef6\u5939\uff0c"
+                "\u6216\u5728\u914d\u7f6e\u4e2d\u586b\u5199 ffmpeg_path\uff0c\u6216\u52a0\u5165 PATH\u3002"
+            )
+        if sys.platform != "win32":
+            raise RuntimeError("\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u76ee\u524d\u4ec5\u652f\u6301 Windows \u684c\u9762\u73af\u5883\u3002")
+
+        duration = max(1, int(duration_seconds or self._get_recording_duration_seconds()))
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        clip_name = f"manual_rec_{timestamp}_{secrets.token_hex(4)}.mp4"
+        output_path = os.path.join(self._get_recording_cache_dir(), clip_name)
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "gdigrab",
+            "-framerate",
+            str(self._get_recording_fps()),
+            "-i",
+            "desktop",
+        ]
+
+        audio_device = self._detect_system_audio_device()
+        if audio_device:
+            cmd.extend(
+                [
+                    "-f",
+                    "dshow",
+                    "-i",
+                    f"audio={audio_device}",
+                    "-shortest",
+                ]
+            )
+
+        cmd.extend(
+            [
+                "-t",
+                str(duration),
+                "-pix_fmt",
+                "yuv420p",
+                output_path,
+            ]
+        )
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=max(duration + 30, 45),
+            creationflags=creationflags,
+        )
+        if result.returncode != 0:
+            stderr_text = (result.stderr or "").strip()
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            raise RuntimeError(
+                "\u5355\u6b21\u5f55\u5c4f\u5931\u8d25\uff0cffmpeg \u5df2\u9000\u51fa\u3002"
+                + (f" stderr: {stderr_text[:300]}" if stderr_text else "")
+            )
+        return output_path
+
+    def _start_screen_recording_sync(self) -> str:
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            raise RuntimeError(
+                "未找到 ffmpeg，请将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                "或在配置中填写 ffmpeg_path，或加入 PATH。"
+            )
+        if sys.platform != "win32":
+            raise RuntimeError("录屏视频识别目前仅支持 Windows 桌面环境")
+
+        process = getattr(self, "_screen_recording_process", None)
+        if process and process.poll() is None:
+            return str(getattr(self, "_screen_recording_path", "") or "")
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(self._get_recording_cache_dir(), f"rec_{timestamp}.mp4")
+        cmd = [
+            ffmpeg_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "gdigrab",
+            "-framerate",
+            str(self._get_recording_fps()),
+            "-i",
+            "desktop",
+        ]
+
+        audio_device = self._detect_system_audio_device()
+        if audio_device:
+            cmd.extend(
+                [
+                    "-f",
+                    "dshow",
+                    "-i",
+                    f"audio={audio_device}",
+                    "-shortest",
+                ]
+            )
+
+        cmd.extend(
+            [
+                "-t",
+                str(self._get_recording_duration_seconds()),
+                "-pix_fmt",
+                "yuv420p",
+                output_path,
+            ]
+        )
+
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        self._screen_recording_process = process
+        self._screen_recording_path = output_path
+        self._cleanup_recording_cache()
+        logger.info(f"已启动桌面录屏: {output_path}")
+        return output_path
+
+    def _stop_screen_recording_sync(self) -> str:
+        process = getattr(self, "_screen_recording_process", None)
+        output_path = str(getattr(self, "_screen_recording_path", "") or "")
+        self._screen_recording_process = None
+
+        if process and process.poll() is None:
+            try:
+                if process.stdin:
+                    process.stdin.write(b"q\n")
+                    process.stdin.flush()
+            except Exception:
+                pass
+
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+
+        return output_path
+
+    async def _ensure_recording_ready(self) -> None:
+        self._ensure_recording_runtime_state()
+        async with self._screen_recording_lock:
+            await asyncio.to_thread(self._start_screen_recording_sync)
+
+    async def _stop_recording_if_running(self) -> None:
+        self._ensure_recording_runtime_state()
+        async with self._screen_recording_lock:
+            await asyncio.to_thread(self._stop_screen_recording_sync)
+
+    def _get_active_window_info(self) -> tuple[str, tuple[int, int, int, int] | None]:
+        title = ""
+        region = None
+        if sys.platform != "win32":
+            return title, region
+
+        try:
+            import pygetwindow
+
+            active_window = pygetwindow.getActiveWindow()
+            if not active_window:
+                return title, region
+
+            title = str(active_window.title or "").strip()
+            left = int(getattr(active_window, "left", 0) or 0)
+            top = int(getattr(active_window, "top", 0) or 0)
+            width = int(getattr(active_window, "width", 0) or 0)
+            height = int(getattr(active_window, "height", 0) or 0)
+            if width > 20 and height > 20:
+                region = (left, top, width, height)
+        except Exception as e:
+            logger.debug(f"获取活动窗口信息失败: {e}")
+
+        return title, region
+
     def _load_observations(self):
         """加载观察记录。"""
         try:
@@ -745,8 +1220,8 @@ class ScreenCompanion(Star):
             import os
             observations_file = os.path.join(self.observation_storage, "observations.json")
             if len(self.observations) > self.max_observations:
-                # 每次达到上限时删除5条，保留15条
-                self.observations = self.observations[-15:]
+                # 每次达到上限时删除6条，保留3天的记录（每天最多3条）
+                self.observations = self.observations[-9:]
             # 整理和补正未知观察记录
             self._cleanup_unknown_observations()
             with open(observations_file, "w", encoding="utf-8") as f:
@@ -826,8 +1301,8 @@ class ScreenCompanion(Star):
         }
         self.observations.append(observation)
         if len(self.observations) > self.max_observations:
-            # 每次达到上限时删除5条，保留15条
-            self.observations = self.observations[-15:]
+            # 每次达到上限时删除6条，保留3天的记录（每天最多3条）
+            self.observations = self.observations[-9:]
         self._save_observations()
         return True
 
@@ -970,7 +1445,7 @@ class ScreenCompanion(Star):
         )
         return any(pattern in normalized for pattern in low_value_patterns)
 
-    def _is_similar_record(self, current_text: str, previous_text: str, threshold: float = 0.92) -> bool:
+    def _is_similar_record(self, current_text: str, previous_text: str, threshold: float = 0.98) -> bool:
         import difflib
 
         current = self._normalize_record_text(current_text)
@@ -1024,9 +1499,8 @@ class ScreenCompanion(Star):
 
             same_context = False
             if normalized_window and previous_window and normalized_window == previous_window:
-                same_context = True
-            elif normalized_scene and previous_scene and normalized_scene == previous_scene:
-                same_context = True
+                if normalized_scene and previous_scene and normalized_scene == previous_scene:
+                    same_context = True
 
             if same_context and self._is_similar_record(normalized_text, previous_text):
                 return False, "duplicate_observation"
@@ -2201,6 +2675,7 @@ class ScreenCompanion(Star):
                     self.web_server = None
                     # 增加延迟时间，确保端口完全释放
                     await asyncio.sleep(1.0)
+                await self._stop_recording_if_running()
                 self.window_companion_active_target = ""
                 self.window_companion_active_rule = {}
 
@@ -2224,20 +2699,26 @@ class ScreenCompanion(Star):
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
+        self._ensure_runtime_state()
         missing_libs = []
-        try:
-            import pyautogui
-        except ImportError:
-            missing_libs.append("pyautogui")
+        if self._use_screen_recording_mode():
+            if not self._get_ffmpeg_path():
+                missing_libs.append("ffmpeg")
+        else:
+            try:
+                import pyautogui
+            except ImportError:
+                missing_libs.append("pyautogui")
 
-        try:
-            from PIL import Image as PILImage
-        except ImportError:
-            missing_libs.append("Pillow")
+            try:
+                from PIL import Image as PILImage
+            except ImportError:
+                missing_libs.append("Pillow")
 
         if (
             sys.platform == "win32"
             and self.capture_active_window
+            and not self._use_screen_recording_mode()
         ):
             try:
                 import pygetwindow
@@ -2257,6 +2738,12 @@ class ScreenCompanion(Star):
                 missing_libs.append("numpy")
 
         if missing_libs:
+            if missing_libs == ["ffmpeg"]:
+                return (
+                    False,
+                    "缺少 ffmpeg。你可以将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                    "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
+                )
             return (
                 False,
                 f"缂哄皯蹇呰渚濊禆搴? {', '.join(missing_libs)}銆傝鎵ц: pip install {' '.join(missing_libs)}",
@@ -2272,6 +2759,18 @@ class ScreenCompanion(Star):
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
+
+        if self._use_screen_recording_mode():
+            if sys.platform != "win32":
+                return False, "录屏视频识别目前仅支持 Windows 桌面环境。"
+            ffmpeg_path = self._get_ffmpeg_path()
+            if not ffmpeg_path:
+                return (
+                    False,
+                    "未检测到 ffmpeg。请将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                    "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
+                )
+            return True, ""
 
         try:
             import pyautogui
@@ -2624,7 +3123,7 @@ class ScreenCompanion(Star):
             def capture_live_screenshot():
                 import pyautogui
 
-                active_title, active_region = get_active_window_info()
+                active_title, active_region = self._get_active_window_info()
                 screenshot = None
 
                 if self.capture_active_window and active_region:
@@ -2719,9 +3218,120 @@ class ScreenCompanion(Star):
         result = await asyncio.to_thread(_core_task)
         return result
 
+    async def _capture_recording_context(self) -> dict[str, Any]:
+        self._ensure_recording_runtime_state()
+        active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
+
+        async with self._screen_recording_lock:
+            current_path = str(getattr(self, "_screen_recording_path", "") or "")
+            current_process = getattr(self, "_screen_recording_process", None)
+            if not current_path:
+                await asyncio.to_thread(self._start_screen_recording_sync)
+                await asyncio.sleep(1.5)
+                current_path = str(getattr(self, "_screen_recording_path", "") or "")
+                current_process = getattr(self, "_screen_recording_process", None)
+
+            if current_process and current_process.poll() is None:
+                video_path = await asyncio.to_thread(self._stop_screen_recording_sync)
+            else:
+                video_path = current_path
+
+            if not video_path or not os.path.exists(video_path):
+                await asyncio.to_thread(self._start_screen_recording_sync)
+                raise RuntimeError("录屏文件尚未准备好，请稍后再试一次。")
+
+            def _read_video_bytes() -> bytes:
+                with open(video_path, "rb") as f:
+                    return f.read()
+
+            video_bytes = await asyncio.to_thread(_read_video_bytes)
+            if not video_bytes:
+                await asyncio.to_thread(self._start_screen_recording_sync)
+                raise RuntimeError("录屏文件为空，请稍后再试一次。")
+
+            if self.save_local:
+                try:
+                    data_dir = StarTools.get_data_dir()
+                    data_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(video_path, str(data_dir / "screen_record_latest.mp4"))
+                except Exception as e:
+                    logger.error(f"保存录屏文件失败: {e}")
+
+            await asyncio.to_thread(self._start_screen_recording_sync)
+            await asyncio.to_thread(self._cleanup_recording_cache)
+
+        return {
+            "media_kind": "video",
+            "mime_type": "video/mp4",
+            "media_bytes": video_bytes,
+            "active_window_title": active_window_title,
+            "source_label": active_window_title or "最近一段桌面录屏",
+        }
+
+    async def _capture_screenshot_context(self) -> dict[str, Any]:
+        image_bytes, active_window_title = await self._capture_screen_bytes()
+        return {
+            "media_kind": "image",
+            "mime_type": "image/jpeg",
+            "media_bytes": image_bytes,
+            "active_window_title": active_window_title,
+            "source_label": active_window_title,
+        }
+
+    async def _capture_one_shot_recording_context(
+        self, duration_seconds: int | None = None
+    ) -> dict[str, Any]:
+        self._ensure_recording_runtime_state()
+        active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
+        duration = max(1, int(duration_seconds or self._get_recording_duration_seconds()))
+
+        async with self._screen_recording_lock:
+            await asyncio.to_thread(self._stop_screen_recording_sync)
+            video_path = await asyncio.to_thread(self._record_screen_clip_sync, duration)
+
+        try:
+            def _read_video_bytes() -> bytes:
+                with open(video_path, "rb") as f:
+                    return f.read()
+
+            video_bytes = await asyncio.to_thread(_read_video_bytes)
+            if not video_bytes:
+                raise RuntimeError("\u5355\u6b21\u5f55\u5c4f\u6587\u4ef6\u4e3a\u7a7a\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u4e00\u6b21\u3002")
+
+            if self.save_local:
+                try:
+                    data_dir = StarTools.get_data_dir()
+                    data_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(video_path, str(data_dir / "screen_record_latest.mp4"))
+                except Exception as e:
+                    logger.error(f"\u4fdd\u5b58\u5355\u6b21\u5f55\u5c4f\u6587\u4ef6\u5931\u8d25: {e}")
+
+            return {
+                "media_kind": "video",
+                "mime_type": "video/mp4",
+                "media_bytes": video_bytes,
+                "active_window_title": active_window_title,
+                "source_label": active_window_title
+                or "\u624b\u52a8\u5f55\u5236\u7684\u6700\u8fd1 10 \u79d2\u684c\u9762\u5f55\u5c4f",
+            }
+        finally:
+            try:
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+            except OSError:
+                pass
+
+    async def _capture_recognition_context(self) -> dict[str, Any]:
+        if self._use_screen_recording_mode():
+            return await self._capture_recording_context()
+
+        return await self._capture_screenshot_context()
+
     async def _call_external_vision_api(
         self,
-        image_bytes: bytes,
+        media_bytes: bytes,
+        media_kind: str = "image",
+        mime_type: str = "image/jpeg",
         scene: str = "",
         active_window_title: str = "",
     ) -> str:
@@ -2729,8 +3339,13 @@ class ScreenCompanion(Star):
         import aiohttp
 
         # 构建请求数据
-        base64_data = base64.b64encode(image_bytes).decode("utf-8")
+        base64_data = base64.b64encode(media_bytes).decode("utf-8")
         image_prompt = self._build_vision_prompt(scene, active_window_title)
+        if media_kind == "video":
+            image_prompt = (
+                "以下为用户当前桌面录屏视频（最近约10秒），你可以参考此内容判断用户正在做什么、进行到哪一步、画面里的关键线索或异常，并给出最值得的一条建议。\n"
+                f"{image_prompt}"
+            )
 
         # 定义API调用函数
         async def call_api(api_url, api_key, api_model):
@@ -2747,7 +3362,7 @@ class ScreenCompanion(Star):
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_data}"
+                                    "url": f"data:{mime_type};base64,{base64_data}"
                                 },
                             },
                         ],
@@ -2838,28 +3453,474 @@ class ScreenCompanion(Star):
         logger.error("所有视觉API调用都失败了")
         return error if error else "视觉分析服务暂时不可用，请稍后再试。"
 
+    @staticmethod
+    def _build_data_url(media_bytes: bytes, mime_type: str) -> str:
+        base64_data = base64.b64encode(media_bytes).decode("utf-8")
+        return f"data:{mime_type};base64,{base64_data}"
+
+    def _get_astrbot_config_candidates(self) -> list[str]:
+        home_dir = os.path.expanduser("~")
+        data_dir = os.path.join(home_dir, ".astrbot", "data")
+        candidates = [
+            os.path.join(data_dir, "cmd_config.json"),
+        ]
+
+        config_dir = os.path.join(data_dir, "config")
+        if os.path.isdir(config_dir):
+            try:
+                abconf_files = [
+                    os.path.join(config_dir, name)
+                    for name in os.listdir(config_dir)
+                    if name.startswith("abconf_") and name.endswith(".json")
+                ]
+                abconf_files.sort(
+                    key=lambda path: os.path.getmtime(path),
+                    reverse=True,
+                )
+                candidates = abconf_files + candidates
+            except Exception as e:
+                logger.debug(f"读取 AstrBot 配置列表失败: {e}")
+
+        return candidates
+
+    def _load_astrbot_provider_registry(self) -> dict[str, Any]:
+        for path in self._get_astrbot_config_candidates():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and (
+                    isinstance(data.get("provider"), list)
+                    or isinstance(data.get("provider_sources"), list)
+                ):
+                    return data
+            except Exception as e:
+                logger.debug(f"读取 AstrBot provider 配置失败 {path}: {e}")
+        return {}
+
+    @staticmethod
+    def _looks_like_gemini_model(model_name: str) -> bool:
+        return "gemini" in str(model_name or "").strip().lower()
+
+    @staticmethod
+    def _is_official_gemini_api_base(api_base: str) -> bool:
+        normalized = str(api_base or "").strip().lower()
+        return "generativelanguage.googleapis.com" in normalized
+
+    async def _get_current_chat_provider_id(self, umo: str | None = None) -> str:
+        try:
+            getter = getattr(self.context, "get_current_chat_provider_id", None)
+            if getter:
+                provider_id = await getter(umo=umo)
+                return str(provider_id or "").strip()
+        except Exception as e:
+            logger.debug(f"获取当前聊天 provider_id 失败: {e}")
+        return ""
+
+    def _resolve_provider_runtime_info(
+        self,
+        provider_id: str = "",
+        provider=None,
+    ) -> dict[str, Any]:
+        registry = self._load_astrbot_provider_registry()
+        provider_entries = registry.get("provider", []) or []
+        provider_sources = registry.get("provider_sources", []) or []
+        provider_settings = registry.get("provider_settings", {}) or {}
+
+        current_provider_id = str(provider_id or "").strip()
+        if not current_provider_id:
+            current_provider_id = str(
+                provider_settings.get("default_provider_id", "") or ""
+            ).strip()
+
+        model_name = ""
+        provider_entry = None
+        if current_provider_id:
+            provider_entry = next(
+                (
+                    item
+                    for item in provider_entries
+                    if str(item.get("id", "") or "").strip() == current_provider_id
+                ),
+                None,
+            )
+
+        if provider_entry is None and provider is not None:
+            for attr_name in ("model", "model_name", "provider_id", "id"):
+                attr_value = getattr(provider, attr_name, None)
+                if not attr_value:
+                    continue
+                attr_str = str(attr_value).strip()
+                if not model_name:
+                    model_name = attr_str
+                matched = next(
+                    (
+                        item
+                        for item in provider_entries
+                        if attr_str
+                        and (
+                            str(item.get("id", "") or "").strip() == attr_str
+                            or str(item.get("model", "") or "").strip() == attr_str
+                        )
+                    ),
+                    None,
+                )
+                if matched is not None:
+                    provider_entry = matched
+                    current_provider_id = str(matched.get("id", "") or "").strip()
+                    break
+
+        if provider_entry is not None and not model_name:
+            model_name = str(provider_entry.get("model", "") or "").strip()
+
+        provider_source_id = ""
+        api_base = ""
+        api_key = ""
+        if provider_entry is not None:
+            provider_source_id = str(provider_entry.get("provider_source_id", "") or "").strip()
+            source_entry = next(
+                (
+                    item
+                    for item in provider_sources
+                    if str(item.get("id", "") or "").strip() == provider_source_id
+                ),
+                None,
+            )
+            if source_entry:
+                api_base = str(source_entry.get("api_base", "") or "").strip()
+                key_list = source_entry.get("key", []) or []
+                if key_list:
+                    api_key = str(key_list[0] or "").strip()
+
+        env_api_key = str(os.environ.get("GEMINI_API_KEY") or "").strip()
+        env_api_base = str(os.environ.get("GEMINI_API_BASE") or "").strip()
+        if env_api_key:
+            api_key = env_api_key
+        if env_api_base:
+            api_base = env_api_base
+
+        if not api_base and api_key and self._looks_like_gemini_model(model_name):
+            api_base = self.GEMINI_API_BASE
+
+        return {
+            "provider_id": current_provider_id,
+            "model": model_name,
+            "api_base": api_base,
+            "api_key": api_key,
+            "provider_source_id": provider_source_id,
+        }
+
+    async def _gemini_upload_file(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        media_bytes: bytes,
+        mime_type: str,
+        display_name: str,
+    ) -> dict[str, Any]:
+        import aiohttp
+
+        start_headers = {
+            "x-goog-api-key": api_key,
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(len(media_bytes)),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": "application/json",
+        }
+        start_payload = {"file": {"display_name": display_name}}
+        start_url = f"{api_base.rstrip('/')}/upload/v1beta/files"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                start_url,
+                headers=start_headers,
+                json=start_payload,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as response:
+                response.raise_for_status()
+                upload_url = response.headers.get("X-Goog-Upload-URL") or response.headers.get(
+                    "x-goog-upload-url"
+                )
+                if not upload_url:
+                    raise RuntimeError("Gemini Files API 未返回上传地址。")
+
+            upload_headers = {
+                "x-goog-api-key": api_key,
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+                "Content-Length": str(len(media_bytes)),
+            }
+            async with session.post(
+                upload_url,
+                headers=upload_headers,
+                data=media_bytes,
+                timeout=aiohttp.ClientTimeout(total=180),
+            ) as response:
+                response.raise_for_status()
+                result = await response.json()
+        return result.get("file", result)
+
+    async def _gemini_wait_file_active(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        file_name: str,
+    ) -> dict[str, Any]:
+        import aiohttp
+
+        endpoint = file_name if str(file_name).startswith("files/") else f"files/{file_name}"
+        url = f"{api_base.rstrip('/')}/v1beta/{endpoint}"
+        deadline = time.time() + float(self.GEMINI_FILE_POLL_TIMEOUT_SECONDS)
+
+        async with aiohttp.ClientSession() as session:
+            while time.time() < deadline:
+                async with session.get(
+                    url,
+                    headers={"x-goog-api-key": api_key},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+
+                state = str(
+                    ((result.get("state") or {}) if isinstance(result.get("state"), dict) else {})
+                    .get("name", result.get("state", ""))
+                    or ""
+                ).upper()
+                if state == "ACTIVE":
+                    return result
+                if state == "FAILED":
+                    raise RuntimeError("Gemini Files API 处理视频失败。")
+                await asyncio.sleep(self.GEMINI_FILE_POLL_INTERVAL_SECONDS)
+
+        raise RuntimeError("Gemini Files API 处理视频超时。")
+
+    async def _gemini_delete_file(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        file_name: str,
+    ) -> None:
+        import aiohttp
+
+        endpoint = file_name if str(file_name).startswith("files/") else f"files/{file_name}"
+        url = f"{api_base.rstrip('/')}/v1beta/{endpoint}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(
+                    url,
+                    headers={"x-goog-api-key": api_key},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status not in {200, 204}:
+                        logger.debug(f"删除 Gemini 临时文件失败: HTTP {response.status}")
+        except Exception as e:
+            logger.debug(f"删除 Gemini 临时文件失败: {e}")
+
+    @staticmethod
+    def _extract_text_from_gemini_response(payload: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for candidate in payload.get("candidates", []) or []:
+            content = candidate.get("content", {}) or {}
+            for part in content.get("parts", []) or []:
+                text = str(part.get("text", "") or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+
+    async def _call_native_gemini_multimodal(
+        self,
+        *,
+        provider_id: str,
+        provider,
+        interaction_prompt: str,
+        system_prompt: str,
+        media_bytes: bytes,
+        media_kind: str,
+        mime_type: str,
+    ):
+        import aiohttp
+
+        runtime = self._resolve_provider_runtime_info(provider_id=provider_id, provider=provider)
+        model_name = str(runtime.get("model", "") or "").strip()
+        api_key = str(runtime.get("api_key", "") or "").strip()
+        api_base = str(runtime.get("api_base", "") or "").strip()
+
+        if not (
+            self._looks_like_gemini_model(model_name)
+            and api_key
+            and self._is_official_gemini_api_base(api_base)
+        ):
+            return None
+
+        if not interaction_prompt.strip():
+            raise RuntimeError("Gemini 原生多模态调用缺少提示词。")
+
+        uploaded_file_name = ""
+        try:
+            if media_kind == "video":
+                uploaded_file = await self._gemini_upload_file(
+                    api_base=api_base,
+                    api_key=api_key,
+                    media_bytes=media_bytes,
+                    mime_type=mime_type,
+                    display_name=f"screen-companion-{uuid.uuid4()}.mp4",
+                )
+                uploaded_file_name = str(uploaded_file.get("name", "") or "").strip()
+                file_info = await self._gemini_wait_file_active(
+                    api_base=api_base,
+                    api_key=api_key,
+                    file_name=uploaded_file_name,
+                )
+                media_part = {
+                    "file_data": {
+                        "mime_type": mime_type,
+                        "file_uri": str(file_info.get("uri", "") or "").strip(),
+                    }
+                }
+            else:
+                media_part = {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64.b64encode(media_bytes).decode("utf-8"),
+                    }
+                }
+
+            payload: dict[str, Any] = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            media_part,
+                            {"text": interaction_prompt},
+                        ],
+                    }
+                ]
+            }
+            if system_prompt.strip():
+                payload["system_instruction"] = {
+                    "parts": [{"text": system_prompt}],
+                }
+
+            url = f"{api_base.rstrip('/')}/v1beta/models/{model_name}:generateContent"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as response:
+                    response.raise_for_status()
+                    result = await response.json()
+
+            response_text = self._extract_text_from_gemini_response(result)
+            if not response_text:
+                raise RuntimeError("Gemini 原生多模态返回为空。")
+            return SimpleNamespace(completion_text=response_text)
+        finally:
+            if uploaded_file_name:
+                await self._gemini_delete_file(
+                    api_base=api_base,
+                    api_key=api_key,
+                    file_name=uploaded_file_name,
+                )
+
+    async def _call_provider_multimodal_direct(
+        self,
+        provider,
+        interaction_prompt: str,
+        system_prompt: str,
+        media_bytes: bytes,
+        media_kind: str = "image",
+        mime_type: str = "image/jpeg",
+        provider_id: str = "",
+    ):
+        native_response = await self._call_native_gemini_multimodal(
+            provider_id=provider_id,
+            provider=provider,
+            interaction_prompt=interaction_prompt,
+            system_prompt=system_prompt,
+            media_bytes=media_bytes,
+            media_kind=media_kind,
+            mime_type=mime_type,
+        )
+        if native_response is not None:
+            return native_response
+
+        if media_kind == "video" and not bool(
+            getattr(self, "allow_unsafe_video_direct_fallback", False)
+        ):
+            raise RuntimeError(
+                "当前 provider 不支持原生视频上传，已拦截视频直发以避免过度消耗 token。"
+                "请开启外部视觉 API，或切换到官方 Gemini API 并配置 GEMINI_API_KEY。"
+            )
+        if media_kind == "video":
+            logger.warning(
+                "当前 provider 不支持原生视频上传，但已按配置允许回退到兼容视频直发。"
+                "这可能导致请求体很大，并带来较高的 token 消耗。"
+            )
+
+        data_url = self._build_data_url(media_bytes, mime_type)
+        multimodal_contexts = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": interaction_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_url},
+                    },
+                ],
+            }
+        ]
+
+        try:
+            return await provider.text_chat(
+                prompt="",
+                system_prompt=system_prompt,
+                contexts=multimodal_contexts,
+            )
+        except TypeError:
+            if media_kind == "image":
+                return await provider.text_chat(
+                    prompt=interaction_prompt,
+                    system_prompt=system_prompt,
+                    image_urls=[data_url],
+                )
+            raise RuntimeError(
+                "当前 AstrBot provider 不支持直接视频多模态上下文，请开启外部视觉 API。"
+            )
+
     async def _run_screen_assist(
         self,
         event: AstrMessageEvent,
         task_id: str = "manual",
         custom_prompt: str = "",
         history_user_text: str = "/kp",
+        capture_context: dict[str, Any] | None = None,
+        capture_timeout: float = 20.0,
     ) -> str | None:
         debug_mode = self.debug
         if debug_mode:
             logger.info(f"[Task {task_id}] status update")
 
-        image_bytes, active_window_title = await asyncio.wait_for(
-            self._capture_screen_bytes(), timeout=10.0
-        )
+        if capture_context is None:
+            capture_context = await asyncio.wait_for(
+                self._capture_recognition_context(), timeout=capture_timeout
+            )
+        media_bytes = capture_context["media_bytes"]
+        active_window_title = capture_context.get("active_window_title", "")
         if debug_mode:
             logger.info(
-                f"[{task_id}] 截图完成，大小: {len(image_bytes)} bytes, 活动窗口: {active_window_title}"
+                f"[{task_id}] 识屏素材已准备，模式: {capture_context.get('media_kind')}, 大小: {len(media_bytes)} bytes, 活动窗口: {active_window_title}"
             )
 
         components = await asyncio.wait_for(
             self._analyze_screen(
-                image_bytes,
+                capture_context,
                 session=event,
                 active_window_title=active_window_title,
                 custom_prompt=custom_prompt,
@@ -2910,6 +3971,53 @@ class ScreenCompanion(Star):
                 logger.debug(f"[{task_id}] 添加对话历史失败: {e}")
 
         return screen_result
+
+    def _check_recording_env(self, check_mic: bool = False) -> tuple[bool, str]:
+        dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
+        if not dep_ok:
+            return False, dep_msg
+
+        if sys.platform != "win32":
+            return False, "\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u76ee\u524d\u4ec5\u652f\u6301 Windows \u684c\u9762\u73af\u5883\u3002"
+
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            return (
+                False,
+                "\u672a\u68c0\u6d4b\u5230 ffmpeg\uff0c\u8bf7\u5c06 ffmpeg.exe \u653e\u5230\u63d2\u4ef6\u76ee\u5f55\u4e0b\u7684 bin \u6587\u4ef6\u5939\uff0c"
+                "\u6216\u5728\u914d\u7f6e\u4e2d\u586b\u5199 ffmpeg_path\uff0c\u6216\u52a0\u5165 PATH\u3002"
+            )
+
+        return True, ""
+
+    def _check_screenshot_env(self, check_mic: bool = False) -> tuple[bool, str]:
+        dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
+        if not dep_ok and "ffmpeg" not in str(dep_msg or "").lower():
+            return False, dep_msg
+
+        try:
+            import pyautogui
+
+            if sys.platform.startswith("linux"):
+                if not os.environ.get("DISPLAY") and not os.environ.get(
+                    "WAYLAND_DISPLAY"
+                ):
+                    return (
+                        False,
+                        "Detected Linux without an available graphical display. Please run it in a desktop session or with X11 forwarding.",
+                    )
+
+            size = pyautogui.size()
+            if size[0] <= 0 or size[1] <= 0:
+                return False, "Unable to capture the screen properly."
+
+            return True, ""
+        except Exception as e:
+            if bool(getattr(self, "use_shared_screenshot_dir", False)):
+                shared_dir = str(getattr(self, "shared_screenshot_dir", "") or "").strip()
+                if shared_dir:
+                    return True, ""
+            return False, f"自我检查失败: {str(e)}"
 
     def _classify_browser_content(self, window_title: str) -> str:
         """根据浏览器窗口标题分类内容类型。"""
@@ -3171,40 +4279,35 @@ class ScreenCompanion(Star):
 
     async def _analyze_screen(
         self,
-        image_bytes: bytes,
+        capture_context: dict[str, Any],
         session=None,
         active_window_title: str = "",
         custom_prompt: str = "",
         task_id: str = "unknown",
     ) -> list[BaseMessageComponent]:
-        """执行一次完整的截图分析与陪伴式回复。"""
-        # 如果当前处于休息时间段，则不调用视觉模型
+        """Analyze the current screenshot or recording context and generate a reply."""
         if self._is_in_rest_time_range():
-            logger.info(
-                f"[任务 {task_id}] 当前处于休息时间段，不调用视觉模型"
-            )
+            logger.info(f"[任务 {task_id}] 当前处于休息时段，跳过识屏。")
             return []
-        
-        # 在调用视觉 API 之前检查活跃时间段
+
         if not self._is_in_active_time_range():
-            logger.info(
-                f"[任务 {task_id}] 当前不在活跃时间段内，取消视觉 API 调用以节省 token"
-            )
+            logger.info(f"[任务 {task_id}] 当前不在主动互动时段，跳过识屏。")
             return []
 
         provider = self.context.get_using_provider()
         if not provider:
-            logger.debug("Debug event")
-            return [Plain("No enabled LLM provider is available.")]
+            return [Plain("当前没有可用的 AstrBot 模型提供方。")]
 
         umo = None
         if session and hasattr(session, "unified_msg_origin"):
             umo = session.unified_msg_origin
-        
-        system_prompt = await self._get_persona_prompt(umo)
-        logger.info(f"[任务 {task_id}] 已加载人格设定")
 
+        system_prompt = await self._get_persona_prompt(umo)
         debug_mode = self.debug
+        media_kind = str(capture_context.get("media_kind", "image") or "image")
+        mime_type = str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg")
+        media_bytes = capture_context.get("media_bytes", b"") or b""
+        use_external_vision = bool(getattr(self, "use_external_vision", True))
 
         scene = "未知"
         scene_prompt = ""
@@ -3213,316 +4316,293 @@ class ScreenCompanion(Star):
         system_status_prompt = ""
         weather_prompt = ""
 
-        # 场景识别
         if active_window_title:
             try:
-                if debug_mode:
-                    logger.info(f"识别到活动窗口: {active_window_title}")
                 scene = self._identify_scene(active_window_title)
-                # 获取场景偏好
                 scene_prompt = self._get_scene_preference(scene)
-                if debug_mode:
-                    logger.info(f"识别场景: {scene}, 场景偏好: {scene_prompt}")
             except Exception as e:
                 if debug_mode:
                     logger.debug(f"场景识别失败: {e}")
 
-        # 获取时间提示
         try:
             time_prompt = self._get_time_prompt()
         except Exception as e:
             if debug_mode:
-                logger.debug(f"时间感知失败: {e}")
+                logger.debug(f"获取时间提示失败: {e}")
 
         try:
             holiday_prompt = self._get_holiday_prompt()
         except Exception as e:
             if debug_mode:
-                logger.debug(f"节假日识别失败: {e}")
+                logger.debug(f"获取节日提示失败: {e}")
 
         try:
-            system_status_prompt, system_high_load = self._get_system_status_prompt()
+            system_status_prompt, _ = self._get_system_status_prompt()
         except Exception as e:
             if debug_mode:
-                logger.debug(f"系统状态检测失败: {e}")
+                logger.debug(f"获取系统状态失败: {e}")
 
-        # 获取天气提示
         try:
             weather_prompt = await self._get_weather_prompt()
         except Exception as e:
             if debug_mode:
-                logger.debug(f"天气感知失败: {e}")
+                logger.debug(f"获取天气提示失败: {e}")
 
-        if debug_mode:
-            logger.info(f"识别场景: {scene}, 时间提示: {time_prompt}")
-
-        # 核心功能：屏幕识别和 LLM 互动
+        contexts: list[str] = []
         try:
-            base64_data = base64.b64encode(image_bytes).decode("utf-8")
-
-            if debug_mode:
-                logger.info("开始调用外部视觉 API 进行屏幕分析")
-                logger.debug(f"System prompt: {system_prompt}")
-                logger.debug(f"Image size: {len(image_bytes)} bytes")
-                logger.debug(f"Base64 data length: {len(base64_data)} characters")
-
-            # 第一阶段：使用外部视觉 API 识别屏幕内容
-            if debug_mode:
-                logger.info("调用外部视觉 API 进行屏幕识别")
-            recognition_text = await self._call_external_vision_api(
-                image_bytes,
-                scene=scene,
-                active_window_title=active_window_title,
-            )
-            recognition_text = self._compress_recognition_text(recognition_text)
-            if debug_mode:
-                logger.info(f"外部 API 识别结果: {recognition_text}")
-
-            # 第二阶段：基于识别结果生成更自然的人格化回复
-            # 尝试获取对话历史，提供更连贯的互动
-            contexts = []
-            try:
-                if hasattr(self.context, "conversation_manager"):
-                    conv_mgr = self.context.conversation_manager
-                    # 安全获取 uid，处理 session 可能失效的情况
-                    uid = ""
+            if hasattr(self.context, "conversation_manager"):
+                conv_mgr = self.context.conversation_manager
+                uid = ""
+                try:
+                    uid = session.unified_msg_origin if session else ""
+                except Exception as e:
+                    if debug_mode:
+                        logger.debug(f"读取会话 UID 失败: {e}")
+                if uid:
                     try:
-                        uid = session.unified_msg_origin if session else ""
+                        curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+                        if curr_cid:
+                            conversation = await conv_mgr.get_conversation(uid, curr_cid)
+                            if conversation and conversation.history:
+                                for msg in conversation.history[-5:]:
+                                    if msg.get("role") in {"user", "assistant"}:
+                                        content = str(msg.get("content", "") or "").strip()
+                                        if content:
+                                            contexts.append(content)
                     except Exception as e:
-                        logger.debug(f"获取 session uid 失败: {e}")
-                    if uid:
-                        try:
-                            curr_cid = await conv_mgr.get_curr_conversation_id(uid)
-                            if curr_cid:
-                                conversation = await conv_mgr.get_conversation(
-                                    uid, curr_cid
-                                )
-                                if conversation and conversation.history:
-                                    # 提取最近的对话历史（最多5条）
-                                    recent_history = conversation.history[-5:]
-                                    for msg in recent_history:
-                                        if msg.get("role") == "user":
-                                            contexts.append(msg.get("content", ""))
-                                        elif msg.get("role") == "assistant":
-                                            contexts.append(msg.get("content", ""))
-                        except Exception as e:
-                            logger.debug(f"获取对话历史失败: {e}")
-            except Exception as e:
-                logger.debug(f"获取对话历史失败: {e}")
+                        if debug_mode:
+                            logger.debug(f"读取对话上下文失败: {e}")
+        except Exception as e:
+            if debug_mode:
+                logger.debug(f"收集上下文失败: {e}")
 
-            # 构建互动提示词，优化顺序以提高LLM回复速度和连贯性
-            interaction_prompt = (
-                f"请根据这次识屏结果，自然地回应用户。"
-                f"\n场景：{scene}"
-                f"\n识别内容：{recognition_text}"
-                "\n优先提炼用户正在做什么、进行到哪一步、哪里值得提醒或建议。"
-                "\n不要机械复述'我看到你在……'，也不要默认给喝水散步之类的泛建议。"
-            )
-            
-            # 最近的对话历史（放在前面以确保连贯性）
+        try:
+            if debug_mode:
+                logger.info("开始分析当前识屏素材")
+                logger.debug(f"System prompt: {system_prompt}")
+                logger.debug(f"Media kind: {media_kind}")
+                logger.debug(f"Mime type: {mime_type}")
+                logger.debug(f"Media size: {len(media_bytes)} bytes")
+
+            if use_external_vision:
+                recognition_text = await self._call_external_vision_api(
+                    media_bytes,
+                    media_kind=media_kind,
+                    mime_type=mime_type,
+                    scene=scene,
+                    active_window_title=active_window_title,
+                )
+                recognition_text = self._compress_recognition_text(recognition_text)
+            else:
+                recognition_text = ""
+
+            material_label = "录屏视频" if media_kind == "video" else "截图"
+            prompt_parts: list[str] = []
+            if use_external_vision:
+                prompt_parts.extend(
+                    [
+                        "你是屏幕伴侣，请结合下面的识屏结果与对话上下文，自然地继续陪伴用户。",
+                        f"当前场景：{scene}",
+                        f"识别结果：{recognition_text or '未获得有效识别结果。'}",
+                        "请优先判断用户正在做什么、可能卡在哪一步，以及现在最值得提醒的一条建议。",
+                    ]
+                )
+            else:
+                prompt_parts.extend(
+                    [
+                        f"你会直接收到一份当前桌面的{material_label}作为多模态输入，请先理解素材内容，再决定如何回复用户。",
+                        f"当前场景：{scene}",
+                        f"素材类型：{media_kind}",
+                        "请只基于当前素材与已有上下文做判断；如果看不清或信息不足，要明确说明不确定。",
+                        "请优先关注用户正在做什么、进行到哪一步，以及此刻最值得提醒的一条建议。",
+                    ]
+                )
+
             if contexts:
-                history_str = "\n最近的对话:\n" + "\n".join(contexts)
-                interaction_prompt += history_str
-            
-            # 相关长期记忆（个性化上下文）
+                prompt_parts.append("最近对话：\n" + "\n".join(contexts))
+
             related_memories = self._trigger_related_memories(scene, active_window_title)
             if related_memories:
-                memory_text = "\n相关长期记忆："
-                for memory in related_memories[:3]:  # 减少记忆数量，只保留最相关的
-                    memory_text += f"\n- {memory}"
-                interaction_prompt += memory_text
+                memory_lines = "\n".join(f"- {memory}" for memory in related_memories[:3])
+                prompt_parts.append("可参考的相关记忆：\n" + memory_lines)
 
             shared_activities = self._get_relevant_shared_activities(scene, limit=3)
             if shared_activities:
-                shared_text = "\n用户明确提过的共同经历："
+                activity_lines = []
                 for activity_name, activity_data in shared_activities:
-                    shared_text += (
-                        f"\n- {self._shared_activity_category_label(activity_data.get('category', 'other'))}: "
-                        f"{activity_name}（最近一次 {activity_data.get('last_shared', '未知')}）"
+                    category = self._shared_activity_category_label(
+                        activity_data.get("category", "other")
                     )
-                interaction_prompt += shared_text
+                    last_shared = activity_data.get("last_shared", "未知")
+                    activity_lines.append(f"- {category}: {activity_name}（最近共同提到：{last_shared}）")
+                prompt_parts.append("可引用的共同经历：\n" + "\n".join(activity_lines))
 
-            # 最近观察记录（上下文）
             if self.observations:
-                recent_observations = self.observations[-3:][::-1]  # 减少观察记录数量
-                observation_text = "\n最近观察记录："
-                for obs in recent_observations:
-                    observation_text += f"\n- {obs['timestamp'].split('T')[1][:5]} {obs['scene']}: {obs['description']}"
-                interaction_prompt += observation_text
-            
-            # 自定义提示词（特定任务）
+                observation_lines = []
+                for obs in self.observations[-3:][::-1]:
+                    timestamp = str(obs.get("timestamp", "")).split("T")[-1][:5]
+                    observation_lines.append(
+                        f"- {timestamp} {obs.get('scene', '未知')}: {obs.get('description', '')}"
+                    )
+                if observation_lines:
+                    prompt_parts.append("最近观察记录：\n" + "\n".join(observation_lines))
+
             if custom_prompt:
-                interaction_prompt += f"\n自定义提示：{custom_prompt}"
-                if debug_mode:
-                    logger.info(f"使用自定义提示词: {custom_prompt}")
+                prompt_parts.append(f"额外要求：{custom_prompt}")
             else:
-                # 场景偏好（个性化）
                 if scene_prompt:
-                    interaction_prompt += f"\n场景偏好：{scene_prompt}"
-                # 时间相关提示（上下文）
+                    prompt_parts.append(f"场景偏好：{scene_prompt}")
                 if time_prompt:
-                    interaction_prompt += f"\n时间：{time_prompt}"
+                    prompt_parts.append(f"时间提示：{time_prompt}")
                 if holiday_prompt:
-                    interaction_prompt += f"\n节假日：{holiday_prompt}"
+                    prompt_parts.append(f"节日提示：{holiday_prompt}")
                 if weather_prompt:
-                    interaction_prompt += f"\n天气：{weather_prompt}"
+                    prompt_parts.append(f"天气提示：{weather_prompt}")
                 if system_status_prompt:
-                    interaction_prompt += f"\n系统状态：{system_status_prompt}"
-            
-            # 休息提醒（如果在休息提醒时间）
+                    prompt_parts.append(f"系统状态：{system_status_prompt}")
+
             if self._is_in_rest_reminder_range():
-                interaction_prompt += "\n休息提醒：只有当任务相关建议不足，且确实出现疲劳迹象时，才轻轻带一句休息提醒。"
-                logger.info(f"[任务 {task_id}] 当前处于休息提醒时间，已附加休息提醒")
-            
-            # 同伴响应指南（格式和风格指导）
-            interaction_prompt += "\n\n" + self._build_companion_response_guide(
-                scene=scene,
-                recognition_text=recognition_text,
-                custom_prompt=custom_prompt,
-                context_count=len(contexts),
+                prompt_parts.append(
+                    "如果用户看起来已经持续工作较久，可以顺带轻提醒对方休息一下，但不要打断当前任务。"
+                )
+
+            prompt_parts.append(
+                self._build_companion_response_guide(
+                    scene=scene,
+                    recognition_text=recognition_text,
+                    custom_prompt=custom_prompt,
+                    context_count=len(contexts),
+                )
             )
 
             if self._should_offer_shared_activity_invite(scene, custom_prompt):
-                interaction_prompt += (
-                    "\n- 如果当前是轻松场景，而且不打扰用户，你可以偶尔用一句低压力的话，"
-                    "表达自己也想和用户一起看电影/动漫、玩一局游戏、做个小测试，"
-                    "或者继续当前这类依赖识屏的互动。"
-                    "\n- 这种提议最多一句，像同伴随口说出来的想法，不要每次都提。"
-                    "\n- 如果引用共同经历，只能引用上面已经记录过的内容；没有记录就只说当前这一刻的想法。"
-                    "\n- 如果眼前任务更需要直接帮助，就优先帮助，不要硬转成邀约。"
+                prompt_parts.append(
+                    "如果语气自然，可以轻轻表达你也想和用户一起做点轻松的事，但必须低频、顺势，不能打断正事。"
                 )
 
-            # 场景特定建议（针对性指导）
-            if scene in ("视频", "阅读"):
-                interaction_prompt += (
-                    "\n- 优先接住画面、内容、情绪或观点，不要把自己说成旁白。"
-                    "\n- 如果要给建议，必须和当前内容直接相关。"
-                )
+            if scene in ("游戏", "视频"):
+                prompt_parts.append("可以更自然地表达陪伴感，但不要抢用户注意力。")
             else:
-                interaction_prompt += "\n- 回应要像同伴，不要像系统播报。"
+                prompt_parts.append("回复尽量简短、具体、贴近当前任务。")
 
-            # 添加超时设置，避免 LLM 调用卡住
+            interaction_prompt = "\n\n".join(part for part in prompt_parts if part)
+
             try:
-                interaction_response = await asyncio.wait_for(
-                    provider.text_chat(
-                        prompt=interaction_prompt, system_prompt=system_prompt
-                    ),
-                    timeout=180.0,  # 进一步增加超时时间，给模型更多响应时间
-                )
+                if use_external_vision:
+                    interaction_response = await asyncio.wait_for(
+                        provider.text_chat(
+                            prompt=interaction_prompt,
+                            system_prompt=system_prompt,
+                        ),
+                        timeout=180.0,
+                    )
+                else:
+                    interaction_response = await asyncio.wait_for(
+                        self._call_provider_multimodal_direct(
+                            provider=provider,
+                            interaction_prompt=interaction_prompt,
+                            system_prompt=system_prompt,
+                            media_bytes=media_bytes,
+                            media_kind=media_kind,
+                            mime_type=mime_type,
+                            provider_id=await self._get_current_chat_provider_id(umo=umo),
+                        ),
+                        timeout=180.0,
+                    )
             except asyncio.TimeoutError:
-                logger.error("LLM 调用超时，请检查网络连接和模型响应速度")
-                return [Plain("分析超时了，请稍后再试。")]
-            
-            # 添加观察记录，只有通过低价值过滤和去重后才持久化
-            observation_stored = self._add_observation(
-                scene, recognition_text, active_window_title
-            )
+                logger.error("LLM 响应超时")
+                return [Plain("这次识屏响应超时了，请稍后再试。")]
 
-            # 提取互动回复
-            response_text = "我先陪你看着这一幕。"
+            response_text = "我看过了，但这一轮还没成功生成回复。"
             if (
                 interaction_response
                 and hasattr(interaction_response, "completion_text")
                 and interaction_response.completion_text
             ):
                 response_text = interaction_response.completion_text
-                if debug_mode:
-                    logger.info(f"互动回复: {response_text}")
-            else:
-                if debug_mode:
-                    logger.warning("模型没有返回有效互动回复")
-            
+            elif debug_mode:
+                logger.warning("模型返回为空")
 
-            
+            if not use_external_vision:
+                recognition_text = self._compress_recognition_text(response_text)
+
+            observation_stored = self._add_observation(
+                scene, recognition_text or response_text, active_window_title
+            )
             if observation_stored:
-                self._update_long_term_memory(scene, active_window_title, 1)  # 假设每次互动持续 1 分钟
-            
+                self._update_long_term_memory(scene, active_window_title, 1)
 
-            
-            # 不再添加不确定表达
-
-            # 更新活动状态，记录工作/摸鱼时间
             self._update_activity(scene, active_window_title)
-            
-            # 清理沉浸感较差的播报式开场，尤其是视频和阅读场景
             response_text = self._polish_response_text(response_text, scene)
-            
-            # 调整互动频率
             self._adjust_interaction_frequency(response_text)
 
         except Exception as e:
-            logger.error(f"核心功能失败: {e}")
-            # 如果核心功能失败，返回一个更自然的默认回复
-            error_msg = str(e)
+            logger.error(f"识屏分析失败: {e}")
+            error_msg = str(e).lower()
             error_type = "unknown"
-            error_text = ""
-            
-            if "timeout" in error_msg.lower() or "瓒呮椂" in error_msg:
+            error_text = "这次识屏分析失败了，请稍后再试。"
+
+            if "timeout" in error_msg:
                 error_type = "timeout"
-                error_text = "刚才像是走神了一下，再来一次？"
-            elif "api" in error_msg.lower() or "api" in error_msg:
+                error_text = "这次识屏请求超时了，请稍后再试。"
+            elif "api" in error_msg:
                 error_type = "api"
-                error_text = "外部接口刚才没顺好，我们可以再试一次。"
-            elif "vision" in error_msg.lower():
+                error_text = "外部接口调用失败了，请检查配置或稍后再试。"
+            elif "vision" in error_msg or "video" in error_msg:
                 error_type = "vision"
-                error_text = "我刚才没看清屏幕内容，重新来一次会更稳。"
-            else:
-                error_type = "unknown"
-                error_text = "刚才有点卡住了，你可以再试一次。"
-            
+                error_text = "当前模型暂时不支持这次多模态识别，请检查视觉配置。"
+
             if error_type != "timeout":
-                self._add_diary_entry(f"[错误-{error_type}] " + error_text, active_window_title)
-            
+                self._add_diary_entry(
+                    f"[识屏异常-{error_type}] {error_text}", active_window_title
+                )
+
             return [Plain(error_text)]
 
-        # 保存截图到临时文件，使用 uuid 生成唯一文件名
+        if media_kind != "image":
+            return [Plain(response_text)]
+
         temp_dir = tempfile.gettempdir()
         temp_file_path = os.path.join(temp_dir, f"screen_shot_{uuid.uuid4()}.jpg")
-
-        # 将 base64 数据写入临时文件
         with open(temp_file_path, "wb") as f:
-            f.write(base64.b64decode(base64_data))
+            f.write(media_bytes)
 
         if self.save_local:
             try:
-                # 确保data目录存在
                 data_dir = StarTools.get_data_dir()
                 data_dir.mkdir(parents=True, exist_ok=True)
-
-                # 保存截图到data目录
                 screenshot_path = str(data_dir / "screen_shot_latest.jpg")
                 shutil.copy2(temp_file_path, screenshot_path)
-                if debug_mode:
-                    logger.info(f"截图已保存到: {screenshot_path}")
             except Exception as e:
-                logger.error(f"保存截图失败: {e}")
+                logger.error(f"保存最新截图失败: {e}")
 
         try:
             return [Plain(response_text), Image(file=temp_file_path)]
         finally:
-            # 操作完成后删除临时文件
             try:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
-                    if debug_mode:
-                        logger.debug(f"临时文件已删除: {temp_file_path}")
             except Exception as e:
-                logger.error(f"删除临时文件失败: {e}")
+                logger.error(f"清理临时截图失败: {e}")
 
     @filter.command("kp")
     async def kp(self, event: AstrMessageEvent):
         """立即执行一次截图分析。"""
-        ok, err_msg = self._check_env()
+        ok, err_msg = self._check_screenshot_env()
         if not ok:
             yield event.plain_result(f"无法使用屏幕观察：\n{err_msg}")
             return
 
         try:
+            capture_context = await asyncio.wait_for(
+                self._capture_screenshot_context(), timeout=20.0
+            )
             screen_result = await self._run_screen_assist(
                 event,
                 task_id="manual",
                 custom_prompt="",
                 history_user_text="/kp",
+                capture_context=capture_context,
             )
 
             if not screen_result:
@@ -3554,6 +4634,67 @@ class ScreenCompanion(Star):
 
             logger.error(traceback.format_exc())
             yield event.plain_result("这次处理失败了，我先缓一口气，你可以再试一次。")
+
+    @filter.command("kpr")
+    async def kpr(self, event: AstrMessageEvent):
+        """\u7acb\u5373\u6267\u884c\u4e00\u6b21\u5f55\u5c4f\u5206\u6790\u3002"""
+        ok, err_msg = self._check_recording_env()
+        if not ok:
+            yield event.plain_result(f"\u65e0\u6cd5\u4f7f\u7528\u5f55\u5c4f\u8bc6\u522b\uff1a\n{err_msg}")
+            return
+
+        try:
+            capture_context = None
+            if not self._use_screen_recording_mode():
+                yield event.plain_result(
+                    f"\u5f53\u524d\u672a\u5f00\u542f\u5f55\u5c4f\u6a21\u5f0f\uff0c\u5c06\u5148\u5f55\u5236 {self._get_recording_duration_seconds()} \u79d2\u684c\u9762\u518d\u7ee7\u7eed\u8bc6\u522b\u3002"
+                )
+                capture_context = await asyncio.wait_for(
+                    self._capture_one_shot_recording_context(
+                        self._get_recording_duration_seconds()
+                    ),
+                    timeout=float(self._get_recording_duration_seconds() + 45),
+                )
+
+            screen_result = await self._run_screen_assist(
+                event,
+                task_id="manual_recording",
+                custom_prompt="",
+                history_user_text="/kpr",
+                capture_context=capture_context,
+            )
+
+            if not screen_result:
+                yield event.plain_result("\u672a\u83b7\u53d6\u5230\u6709\u6548\u8bc6\u522b\u7ed3\u679c")
+                return
+
+            segments = self._split_message(screen_result)
+            if len(segments) > 1:
+                for i in range(len(segments) - 1):
+                    segment = segments[i]
+                    if segment.strip():
+                        await self.context.send_message(
+                            event.unified_msg_origin, MessageChain([Plain(segment)])
+                        )
+                        await asyncio.sleep(0.5)
+                if segments[-1].strip():
+                    yield event.plain_result(segments[-1])
+            else:
+                yield event.plain_result(screen_result)
+
+            if self.debug:
+                logger.info("\u5355\u6b21\u5f55\u5c4f\u6307\u4ee4\u5904\u7406\u5b8c\u6210")
+        except asyncio.TimeoutError:
+            logger.error("\u5355\u6b21\u5f55\u5c4f\u6216\u8bc6\u522b\u64cd\u4f5c\u8d85\u65f6")
+            yield event.plain_result("\u5355\u6b21\u5f55\u5c4f\u6216\u8bc6\u522b\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+        except Exception as e:
+            logger.error(f"\u5355\u6b21\u5f55\u5c4f\u8bc6\u522b\u5931\u8d25: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            yield event.plain_result(
+                "\u8fd9\u6b21\u5f55\u5c4f\u8bc6\u522b\u5931\u8d25\u4e86\uff0c\u4f60\u53ef\u4ee5\u7a0d\u540e\u518d\u8bd5\u4e00\u6b21\u3002"
+            )
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=0)
     async def on_shared_activity_memory(self, event: AstrMessageEvent):
@@ -3625,6 +4766,7 @@ class ScreenCompanion(Star):
     @filter.command("kps")
     async def kps(self, event: AstrMessageEvent):
         """切换自动观察运行状态。"""
+        self._ensure_runtime_state()
         if self.state == "active":
             # 停止自动观察
             self.state = "inactive"
@@ -3716,6 +4858,7 @@ class ScreenCompanion(Star):
 
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):
+        self._ensure_runtime_state()
         if not self.enabled:
             yield event.plain_result(
                     "插件当前未启用，请先在配置中开启后再启动自动观察。"
@@ -3744,6 +4887,7 @@ class ScreenCompanion(Star):
     @kpi_group.command("stop")
     async def kpi_stop(self, event: AstrMessageEvent, task_id: str = None):
         """停止自动观察任务。"""
+        self._ensure_runtime_state()
         if task_id:
             if task_id in self.auto_tasks:
                 task = self.auto_tasks.pop(task_id)
@@ -3783,9 +4927,10 @@ class ScreenCompanion(Star):
             end_response = await self._get_end_response(event.unified_msg_origin)
             yield event.plain_result(f"已停止所有自动观察任务。\n{end_response}")
 
-    @filter.command("webui")
+    @kpi_group.command("webui")
     async def webui_command(self, event: AstrMessageEvent):
         """查看 WebUI 信息。"""
+        self._ensure_runtime_state()
         if self.webui_enabled:
             # 检查 WebUI 服务是否正在运行
             webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
@@ -3843,6 +4988,7 @@ class ScreenCompanion(Star):
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
         """列出当前运行中的自动观察任务。"""
+        self._ensure_runtime_state()
         if not self.auto_tasks:
             yield event.plain_result("当前没有运行中的自动观察任务。")
         else:
@@ -3850,6 +4996,44 @@ class ScreenCompanion(Star):
             for task_id in self.auto_tasks:
                 msg += f"- {task_id}\n"
             yield event.plain_result(msg)
+
+    @kpi_group.command("ffmpeg")
+    async def kpi_ffmpeg(self, event: AstrMessageEvent, path: str = None):
+        """设置 ffmpeg 路径并自动复制到插件目录。"""
+        import shutil
+        
+        if not path:
+            current_ffmpeg = self._get_ffmpeg_path()
+            if current_ffmpeg:
+                yield event.plain_result(f"当前 ffmpeg 路径：{current_ffmpeg}")
+            else:
+                yield event.plain_result(
+                    "未找到 ffmpeg。\n"
+                    "用法: /kpi ffmpeg [ffmpeg.exe 所在路径]\n"
+                    "例如: /kpi ffmpeg C:\\Users\\用户名\\Downloads\\ffmpeg\\bin\\ffmpeg.exe\n"
+                    "\n"
+                    "插件会自动将 ffmpeg 复制到插件目录的 bin 文件夹。"
+                )
+            return
+        
+        source_path = os.path.abspath(os.path.expanduser(path.strip()))
+        
+        ffmpeg_bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        os.makedirs(ffmpeg_bin_dir, exist_ok=True)
+        
+        dest_path = os.path.join(ffmpeg_bin_dir, "ffmpeg.exe")
+        
+        if not os.path.exists(source_path):
+            yield event.plain_result(f"源文件不存在：{source_path}")
+            return
+        
+        try:
+            shutil.copy2(source_path, dest_path)
+            self._recording_ffmpeg_path = None  # 清除缓存，强制重新检测
+            new_path = self._get_ffmpeg_path()
+            yield event.plain_result(f"ffmpeg 已复制到：{new_path}")
+        except Exception as e:
+            yield event.plain_result(f"复制失败：{str(e)}")
 
     @kpi_group.command("y")
     async def kpi_y(self, event: AstrMessageEvent, preset_index: int = None, interval: int = None, probability: int = None):
@@ -4756,6 +5940,7 @@ class ScreenCompanion(Star):
 
     async def _start_webui(self):
         """启动 Web UI 服务器"""
+        self._ensure_runtime_state()
         webui_lock = getattr(self, "_webui_lock", None)
         if webui_lock is None:
             self._webui_lock = asyncio.Lock()
@@ -4783,6 +5968,7 @@ class ScreenCompanion(Star):
 
     async def _stop_webui(self):
         """停止 Web UI 服务器"""
+        self._ensure_runtime_state()
         webui_lock = getattr(self, "_webui_lock", None)
         if webui_lock is None:
             self._webui_lock = asyncio.Lock()
@@ -5038,6 +6224,7 @@ class ScreenCompanion(Star):
 
     async def _task_scheduler(self):
         """后台任务调度器。"""
+        self._ensure_runtime_state()
         while self.running:
             try:
                     # 从队列中获取任务
@@ -5164,6 +6351,7 @@ class ScreenCompanion(Star):
 
     async def _mic_monitor_task(self):
         """后台麦克风监听任务。"""
+        self._ensure_runtime_state()
         # 检查麦克风依赖
         mic_deps_ok = False
         try:
@@ -5244,12 +6432,13 @@ class ScreenCompanion(Star):
 
                                 event = VirtualEvent()
 
-                                image_bytes, active_window_title = await asyncio.wait_for(
-                                    self._capture_screen_bytes(), timeout=10.0
+                                capture_context = await asyncio.wait_for(
+                                    self._capture_recognition_context(), timeout=20.0
                                 )
+                                active_window_title = capture_context.get("active_window_title", "")
                                 components = await asyncio.wait_for(
                                     self._analyze_screen(
-                                        image_bytes,
+                                        capture_context,
                                         session=event,
                                         active_window_title=active_window_title,
                                         custom_prompt="我听到你刚才声音有点大，像是发生了什么，帮你看看现在的情况。",
@@ -5438,6 +6627,7 @@ class ScreenCompanion(Star):
 
     async def _custom_tasks_task(self):
         """后台自定义任务调度循环。"""
+        self._ensure_runtime_state()
         while self.running:
             try:
                 now = datetime.datetime.now()
@@ -5477,12 +6667,13 @@ class ScreenCompanion(Star):
                             # 定义临时任务函数
                             async def temp_custom_task():
                                 try:
-                                    image_bytes, active_window_title = await asyncio.wait_for(
-                                        self._capture_screen_bytes(), timeout=10.0
+                                    capture_context = await asyncio.wait_for(
+                                        self._capture_recognition_context(), timeout=20.0
                                     )
+                                    active_window_title = capture_context.get("active_window_title", "")
                                     components = await asyncio.wait_for(
                                         self._analyze_screen(
-                                            image_bytes,
+                                            capture_context,
                                             active_window_title=active_window_title,
                                             custom_prompt=task["prompt"],
                                             task_id=temp_task_id,
@@ -5586,6 +6777,7 @@ class ScreenCompanion(Star):
         custom_prompt: 自定义提示词
         interval: 自定义检查间隔（秒）
         """
+        self._ensure_runtime_state()
         logger.info(f"[任务 {task_id}] 启动自动识屏任务")
         try:
             while self.is_running and self.state == "active":
@@ -5752,9 +6944,10 @@ class ScreenCompanion(Star):
                             )
                             break
 
-                        image_bytes, active_window_title = await asyncio.wait_for(
-                            self._capture_screen_bytes(), timeout=10.0
+                        capture_context = await asyncio.wait_for(
+                            self._capture_recognition_context(), timeout=20.0
                         )
+                        active_window_title = capture_context.get("active_window_title", "")
 
                         # 检查是否运行中
                         if not self.is_running or self.state != "active":
@@ -5765,7 +6958,7 @@ class ScreenCompanion(Star):
 
                         components = await asyncio.wait_for(
                             self._analyze_screen(
-                                image_bytes,
+                                capture_context,
                                 session=event,
                                 active_window_title=active_window_title,
                                 custom_prompt=custom_prompt,

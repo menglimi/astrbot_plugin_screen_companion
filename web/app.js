@@ -53,7 +53,8 @@ const elements = {
     sceneFilter: document.getElementById("sceneFilter"),
     sortFilter: document.getElementById("sortFilter"),
     selectAllObservations: document.getElementById("selectAllObservations"),
-    clearSelectionButton: document.getElementById("clearSelectionButton"),
+    clearSelectionsButton: document.getElementById("clearSelectionsButton"),
+    clearAllDataButton: document.getElementById("clearAllDataButton"),
     deleteSelectedButton: document.getElementById("deleteSelectedButton"),
     memoryHighlights: document.getElementById("memoryHighlights"),
     memoryGroups: document.getElementById("memoryGroups"),
@@ -67,6 +68,8 @@ const elements = {
     runtimeMeta: document.getElementById("runtimeMeta"),
     runtimeStats: document.getElementById("runtimeStats"),
     runtimeInsights: document.getElementById("runtimeInsights"),
+    runtimeMedia: document.getElementById("runtimeMedia"),
+    runtimeMediaMeta: document.getElementById("runtimeMediaMeta"),
     runtimeForm: document.getElementById("runtimeForm"),
     runtimeFeedback: document.getElementById("runtimeFeedback"),
     enabledSelect: document.getElementById("enabledSelect"),
@@ -136,6 +139,20 @@ function formatDateLabel(value) {
         day: "numeric",
         weekday: "short",
     }).format(date);
+}
+
+function formatBytes(value) {
+    const size = Number(value || 0);
+    if (!Number.isFinite(size) || size <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    let current = size;
+    let index = 0;
+    while (current >= 1024 && index < units.length - 1) {
+        current /= 1024;
+        index += 1;
+    }
+    const digits = current >= 100 || index === 0 ? 0 : 1;
+    return `${current.toFixed(digits)} ${units[index]}`;
 }
 
 async function apiFetch(url, options = {}) {
@@ -355,34 +372,45 @@ function renderRuntimeInsights(runtime) {
 
     const insights = [
         {
-            title: "识屏模式",
-            body: runtime.use_shared_screenshot_dir
-                ? `当前为共享截图目录模式，适合 Docker 等无法直接截图的环境。${runtime.shared_screenshot_dir ? `目录：${runtime.shared_screenshot_dir}` : "建议确认共享目录路径已配置且会持续更新。"}`
-                : "当前为实时截图模式，适合普通桌面环境，能避免误读旧截图。",
-            actions: [{ label: "调整识屏设置", action: "open-vision-group" }],
+            title: "\u8bc6\u5c4f\u6a21\u5f0f",
+            body: runtime.screen_recognition_mode
+                ? "\u5f53\u524d\u4e3a\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u6a21\u5f0f\u3002\u63d2\u4ef6\u4f1a\u5148\u7528 ffmpeg \u5f55\u5236\u6700\u8fd1\u4e00\u6bb5\u684c\u9762 mp4\uff0c\u518d\u628a\u89c6\u9891 base64 \u4f5c\u4e3a\u591a\u6a21\u6001\u6d88\u606f\u53d1\u7ed9\u6a21\u578b\u7406\u89e3\u3002"
+                : runtime.use_shared_screenshot_dir
+                    ? `\u5f53\u524d\u4e3a\u5171\u4eab\u622a\u56fe\u76ee\u5f55\u6a21\u5f0f\uff0c\u9002\u5408 Docker \u7b49\u65e0\u6cd5\u76f4\u63a5\u622a\u56fe\u7684\u73af\u5883\u3002${runtime.shared_screenshot_dir ? `\u76ee\u5f55\uff1a${runtime.shared_screenshot_dir}` : "\u5efa\u8bae\u786e\u8ba4\u5171\u4eab\u76ee\u5f55\u8def\u5f84\u5df2\u914d\u7f6e\u4e14\u4f1a\u6301\u7eed\u66f4\u65b0\u3002"}`
+                    : "\u5f53\u524d\u4e3a\u5b9e\u65f6\u622a\u56fe\u6a21\u5f0f\uff0c\u9002\u5408\u666e\u901a\u684c\u9762\u73af\u5883\uff0c\u80fd\u907f\u514d\u8bef\u8bfb\u65e7\u622a\u56fe\u3002",
+            actions: [{ label: "\u8c03\u6574\u8bc6\u5c4f\u8bbe\u7f6e", action: "open-vision-group" }],
         },
         {
-            title: "自然语言求助",
+            title: "\u8bc6\u522b\u94fe\u8def",
+            body: runtime.use_external_vision
+                ? "\u5f53\u524d\u4f1a\u5148\u8c03\u7528\u5916\u90e8\u89c6\u89c9 API\uff0c\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210\u8bc6\u522b\u6587\u672c\u540e\uff0c\u518d\u4ea4\u7ed9 AstrBot \u7ed3\u5408\u4e0a\u4e0b\u6587\u56de\u590d\u3002"
+                : "\u5f53\u524d\u4e0d\u4f1a\u8c03\u7528\u5916\u90e8\u89c6\u89c9 API\uff0c\u800c\u662f\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210 base64 \u591a\u6a21\u6001\u6d88\u606f\uff0c\u76f4\u63a5\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002",
+            actions: [{ label: "\u67e5\u770b\u89c6\u89c9\u94fe\u8def", action: "open-vision-group" }],
+        },
+        {
+            title: "\u81ea\u7136\u8bed\u8a00\u6c42\u52a9",
             body: runtime.enable_natural_language_screen_assist
-                ? "已开启。用户明确说“帮我看看屏幕”这类话时，Bot 会主动识屏并给建议。"
-                : "默认关闭，可减少误触。如果你希望 Bot 在自然对话里主动帮你看屏幕，可以手动打开。",
+                ? "\u5df2\u5f00\u542f\u3002\u7528\u6237\u660e\u786e\u8bf4\u201c\u5e2e\u6211\u770b\u770b\u5c4f\u5e55\u201d\u8fd9\u7c7b\u8bdd\u65f6\uff0cBot \u4f1a\u4e3b\u52a8\u8bc6\u5c4f\u5e76\u7ed9\u5efa\u8bae\u3002"
+                : "\u9ed8\u8ba4\u5173\u95ed\uff0c\u53ef\u51cf\u5c11\u8bef\u89e6\u3002\u5982\u679c\u4f60\u5e0c\u671b Bot \u5728\u81ea\u7136\u5bf9\u8bdd\u91cc\u4e3b\u52a8\u5e2e\u4f60\u770b\u5c4f\u5e55\uff0c\u53ef\u4ee5\u624b\u52a8\u6253\u5f00\u3002",
             actions: [
-                { label: runtime.enable_natural_language_screen_assist ? "关闭求助触发" : "开启求助触发", action: "toggle-screen-assist" },
-                { label: "前往人格设置", action: "open-persona-group" },
+                { label: runtime.enable_natural_language_screen_assist ? "\u5173\u95ed\u6c42\u52a9\u89e6\u53d1" : "\u5f00\u542f\u6c42\u52a9\u89e6\u53d1", action: "toggle-screen-assist" },
+                { label: "\u524d\u5f80\u4eba\u683c\u8bbe\u7f6e", action: "open-persona-group" },
             ],
         },
         {
-            title: "窗口自动陪伴",
+            title: "\u7a97\u53e3\u81ea\u52a8\u966a\u4f34",
             body: runtime.enable_window_companion
-                ? `已开启。${runtime.window_companion_active_title ? `当前正陪着《${runtime.window_companion_active_title}》。` : "会在命中的窗口出现时自动过来，窗口关闭后自动退场。"}`
-                : "默认关闭。适合给常用游戏、IDE 或视频播放器做“窗口一开就来”的陪伴联动。",
-            actions: [{ label: "配置窗口陪伴", action: "open-runtime-group" }],
+                ? `\u5df2\u5f00\u542f\u3002${runtime.window_companion_active_title ? `\u5f53\u524d\u6b63\u966a\u7740\u300a${runtime.window_companion_active_title}\u300b\u3002` : "\u4f1a\u5728\u547d\u4e2d\u7684\u7a97\u53e3\u51fa\u73b0\u65f6\u81ea\u52a8\u8fc7\u6765\uff0c\u7a97\u53e3\u5173\u95ed\u540e\u81ea\u52a8\u9000\u573a\u3002"}`
+                : "\u9ed8\u8ba4\u5173\u95ed\u3002\u9002\u5408\u7ed9\u5e38\u7528\u6e38\u620f\u3001IDE \u6216\u89c6\u9891\u64ad\u653e\u5668\u505a\u201c\u7a97\u53e3\u4e00\u5f00\u5c31\u6765\u201d\u7684\u966a\u4f34\u8054\u52a8\u3002",
+            actions: [{ label: "\u914d\u7f6e\u7a97\u53e3\u966a\u4f34", action: "open-runtime-group" }],
         },
         {
-            title: "截图留存",
+            title: "\u7d20\u6750\u7559\u5b58",
             body: runtime.save_local
-                ? "当前会在本地保留最近一次截图，方便排查识屏结果。"
-                : "当前不会保留本地截图，更省空间，也更偏隐私友好。",
+                ? runtime.screen_recognition_mode
+                    ? "\u5f53\u524d\u4f1a\u5728\u672c\u5730\u4fdd\u7559\u6700\u8fd1\u4e00\u6b21\u5f55\u5c4f mp4\uff0c\u65b9\u4fbf\u6392\u67e5\u89c6\u9891\u8bc6\u522b\u7ed3\u679c\u3002"
+                    : "\u5f53\u524d\u4f1a\u5728\u672c\u5730\u4fdd\u7559\u6700\u8fd1\u4e00\u6b21\u622a\u56fe\uff0c\u65b9\u4fbf\u6392\u67e5\u8bc6\u5c4f\u7ed3\u679c\u3002"
+                : "\u5f53\u524d\u4e0d\u4f1a\u4fdd\u7559\u672c\u5730\u8bc6\u522b\u7d20\u6750\uff0c\u66f4\u7701\u7a7a\u95f4\uff0c\u4e5f\u66f4\u504f\u9690\u79c1\u53cb\u597d\u3002",
             actions: [],
         },
     ];
@@ -399,6 +427,62 @@ function renderRuntimeInsights(runtime) {
             ${actions}
         `;
         elements.runtimeInsights.appendChild(card);
+    });
+}
+
+function renderRuntimeMedia(runtime) {
+    elements.runtimeMedia.innerHTML = "";
+    if (!runtime) {
+        elements.runtimeMediaMeta.textContent = "等待运行态加载。";
+        elements.runtimeMedia.appendChild(cloneEmptyState());
+        return;
+    }
+
+    if (state.requiresAuth && !state.isAuthenticated) {
+        elements.runtimeMediaMeta.textContent = "登录后可查看最新识别素材。";
+        elements.runtimeMedia.appendChild(cloneEmptyState());
+        return;
+    }
+
+    const mediaItems = [runtime.latest_screenshot, runtime.latest_video].filter(Boolean);
+    const availableCount = mediaItems.filter((item) => item.available).length;
+    elements.runtimeMediaMeta.textContent = availableCount
+        ? `当前可预览 ${availableCount} 份最新素材。`
+        : "当前没有可直接预览的素材。";
+
+    mediaItems.forEach((item) => {
+        const card = document.createElement("article");
+        card.className = "runtime-media-card";
+        const title = item.kind === "video" ? "最新录屏" : "最新截图";
+        const meta = item.available
+            ? `${formatDateTime(item.updated_at)} · ${formatBytes(item.size_bytes)}`
+            : (item.message || "暂无可预览素材");
+        let preview = '<div class="empty-state"><strong>暂无可预览素材</strong></div>';
+        if (item.available && item.url) {
+            if (item.kind === "video") {
+                preview = `
+                    <video class="runtime-media-preview" controls preload="metadata">
+                        <source src="${escapeHtml(item.url)}" type="video/mp4">
+                    </video>
+                `;
+            } else {
+                preview = `<img class="runtime-media-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(title)}">`;
+            }
+        }
+        const action = item.available && item.url
+            ? `<a class="ghost-button runtime-media-link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">打开原文件</a>`
+            : "";
+        card.innerHTML = `
+            <div class="panel-header">
+                <div>
+                    <h4>${escapeHtml(title)}</h4>
+                    <span class="panel-subtle">${escapeHtml(meta)}</span>
+                </div>
+                ${action}
+            </div>
+            <div class="runtime-media-frame">${preview}</div>
+        `;
+        elements.runtimeMedia.appendChild(card);
     });
 }
 
@@ -439,53 +523,68 @@ function renderSettingsHelper(activeGroup, currentValues) {
 
     if (activeGroup.id === "vision") {
         cards.push({
-            title: currentValues.use_shared_screenshot_dir ? "Docker / 共享目录模式" : "实时截图模式",
-            body: currentValues.use_shared_screenshot_dir
-                ? `当前会优先读取共享目录里的截图。${currentValues.shared_screenshot_dir ? `目录：${currentValues.shared_screenshot_dir}` : "建议补充共享目录路径。"}`
-                : "普通桌面环境推荐保持这个模式，能避免读到旧图，也不需要额外挂载截图目录。",
-            actions: currentValues.use_shared_screenshot_dir
-                ? [{ label: "改回实时截图推荐值", action: "vision-live" }]
-                : [{ label: "切到 Docker 模式", action: "vision-docker" }],
+            title: currentValues.screen_recognition_mode
+                ? "\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u6a21\u5f0f"
+                : currentValues.use_shared_screenshot_dir
+                    ? "Docker / \u5171\u4eab\u76ee\u5f55\u6a21\u5f0f"
+                    : "\u5b9e\u65f6\u622a\u56fe\u6a21\u5f0f",
+            body: currentValues.screen_recognition_mode
+                ? "\u4f1a\u5728\u672c\u5730\u7528 ffmpeg \u5f55\u5236\u684c\u9762 mp4\uff0c\u5e76\u5728\u89e6\u53d1\u804a\u5929\u65f6\u628a\u6700\u8fd1\u4e00\u6bb5\u5f55\u5c4f\u4f5c\u4e3a\u8bc6\u522b\u7d20\u6750\u3002\u5efa\u8bae\u786e\u8ba4\u7cfb\u7edf\u91cc\u53ef\u76f4\u63a5\u8c03\u7528 ffmpeg\u3002"
+                : currentValues.use_shared_screenshot_dir
+                    ? `\u5f53\u524d\u4f1a\u4f18\u5148\u8bfb\u53d6\u5171\u4eab\u76ee\u5f55\u91cc\u7684\u622a\u56fe\u3002${currentValues.shared_screenshot_dir ? `\u76ee\u5f55\uff1a${currentValues.shared_screenshot_dir}` : "\u5efa\u8bae\u8865\u5145\u5171\u4eab\u76ee\u5f55\u8def\u5f84\u3002"}`
+                    : "\u666e\u901a\u684c\u9762\u73af\u5883\u63a8\u8350\u4fdd\u6301\u8fd9\u4e2a\u6a21\u5f0f\uff0c\u80fd\u907f\u514d\u8bfb\u5230\u65e7\u56fe\uff0c\u4e5f\u4e0d\u9700\u8981\u989d\u5916\u6302\u8f7d\u622a\u56fe\u76ee\u5f55\u3002",
+            actions: currentValues.screen_recognition_mode
+                ? []
+                : currentValues.use_shared_screenshot_dir
+                    ? [{ label: "\u6539\u56de\u5b9e\u65f6\u622a\u56fe\u63a8\u8350\u503c", action: "vision-live" }]
+                    : [{ label: "\u5207\u5230 Docker \u6a21\u5f0f", action: "vision-docker" }],
         });
         cards.push({
-            title: "识屏建议",
-            body: "如果要减少 token，优先把 image_prompt 保持简短，并只让模型输出任务、阶段、关键线索和一个建议点。",
+            title: currentValues.use_external_vision ? "\u4e24\u6b65\u8bc6\u522b\u94fe\u8def" : "\u76f4\u63a5 AstrBot \u591a\u6a21\u6001",
+            body: currentValues.use_external_vision
+                ? "\u4f1a\u5148\u8c03\u7528\u5916\u90e8\u89c6\u89c9 API \u83b7\u53d6\u8bc6\u522b\u7ed3\u679c\uff0c\u518d\u628a\u8bc6\u522b\u6587\u672c\u548c\u4e0a\u4e0b\u6587\u4ea4\u7ed9 AstrBot \u751f\u6210\u6700\u7ec8\u56de\u590d\u3002"
+                : "\u4e0d\u4f1a\u5148\u8d70\u5916\u90e8\u89c6\u89c9 API\uff0c\u800c\u662f\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u76f4\u63a5\u8f6c\u6210 base64 \u591a\u6a21\u6001\u6d88\u606f\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002\u524d\u63d0\u662f\u5f53\u524d provider \u771f\u6b63\u652f\u6301\u5bf9\u5e94\u56fe\u7247\u6216\u89c6\u9891\u8f93\u5165\u3002",
+            actions: [],
+        });
+        cards.push({
+            title: "\u8bc6\u5c4f\u5efa\u8bae",
+            body: "\u5982\u679c\u8981\u51cf\u5c11 token\uff0c\u4f18\u5148\u628a image_prompt \u4fdd\u6301\u7b80\u77ed\uff0c\u5e76\u53ea\u8ba9\u6a21\u578b\u8f93\u51fa\u4efb\u52a1\u3001\u9636\u6bb5\u3001\u5173\u952e\u7ebf\u7d22\u548c\u4e00\u4e2a\u5efa\u8bae\u70b9\u3002",
             actions: [],
         });
     }
 
     if (activeGroup.id === "persona") {
         cards.push({
-            title: currentValues.enable_natural_language_screen_assist ? "自然语言识屏求助已开启" : "自然语言识屏求助已关闭",
+            title: currentValues.enable_natural_language_screen_assist ? "\u81ea\u7136\u8bed\u8a00\u8bc6\u5c4f\u6c42\u52a9\u5df2\u5f00\u542f" : "\u81ea\u7136\u8bed\u8a00\u8bc6\u5c4f\u6c42\u52a9\u5df2\u5173\u95ed",
             body: currentValues.enable_natural_language_screen_assist
-                ? "现在用户明确求助时，Bot 会主动看屏幕再回答。适合游戏出装、做题、排错这类场景。"
-                : "默认关闭更稳，避免普通聊天误触发。只有你希望 Bot 在自然对话里主动识屏时再打开。",
+                ? "\u73b0\u5728\u7528\u6237\u660e\u786e\u6c42\u52a9\u65f6\uff0cBot \u4f1a\u4e3b\u52a8\u770b\u5c4f\u5e55\u518d\u56de\u7b54\u3002\u9002\u5408\u6e38\u620f\u51fa\u88c5\u3001\u505a\u9898\u3001\u6392\u9519\u8fd9\u7c7b\u573a\u666f\u3002"
+                : "\u9ed8\u8ba4\u5173\u95ed\u66f4\u7a33\uff0c\u907f\u514d\u666e\u901a\u804a\u5929\u8bef\u89e6\u53d1\u3002\u53ea\u6709\u4f60\u5e0c\u671b Bot \u5728\u81ea\u7136\u5bf9\u8bdd\u91cc\u4e3b\u52a8\u8bc6\u5c4f\u65f6\u518d\u6253\u5f00\u3002",
             actions: [
-                { label: currentValues.enable_natural_language_screen_assist ? "关闭它" : "开启它", action: "toggle-screen-assist" },
-                { label: "查看识屏设置", action: "open-vision-group" },
+                { label: currentValues.enable_natural_language_screen_assist ? "\u5173\u95ed\u5b83" : "\u5f00\u542f\u5b83", action: "toggle-screen-assist" },
+                { label: "\u67e5\u770b\u8bc6\u5c4f\u8bbe\u7f6e", action: "open-vision-group" },
             ],
         });
     }
 
     if (activeGroup.id === "runtime") {
         cards.push({
-            title: currentValues.enable_window_companion ? "窗口自动陪伴已开启" : "窗口自动陪伴已关闭",
+            title: currentValues.enable_window_companion ? "\u7a97\u53e3\u81ea\u52a8\u966a\u4f34\u5df2\u5f00\u542f" : "\u7a97\u53e3\u81ea\u52a8\u966a\u4f34\u5df2\u5173\u95ed",
             body: currentValues.enable_window_companion
-                ? "命中的窗口出现后，Bot 会自动开陪伴；窗口关掉后会自动退场。适合常驻游戏、IDE、视频播放器。"
-                : "打开后就能把某个窗口和陪伴任务绑定起来，不需要每次手动把 Bot 叫过来。",
+                ? "\u547d\u4e2d\u7684\u7a97\u53e3\u51fa\u73b0\u540e\uff0cBot \u4f1a\u81ea\u52a8\u5f00\u966a\u4f34\uff1b\u7a97\u53e3\u5173\u6389\u540e\u4f1a\u81ea\u52a8\u9000\u573a\u3002\u9002\u5408\u5e38\u9a7b\u6e38\u620f\u3001IDE\u3001\u89c6\u9891\u64ad\u653e\u5668\u3002"
+                : "\u6253\u5f00\u540e\u5c31\u80fd\u628a\u67d0\u4e2a\u7a97\u53e3\u548c\u966a\u4f34\u4efb\u52a1\u7ed1\u5b9a\u8d77\u6765\uff0c\u4e0d\u9700\u8981\u6bcf\u6b21\u624b\u52a8\u628a Bot \u53eb\u8fc7\u6765\u3002",
             actions: [
                 {
-                    label: currentValues.enable_window_companion ? "关闭自动陪伴" : "开启自动陪伴",
+                    label: currentValues.enable_window_companion ? "\u5173\u95ed\u81ea\u52a8\u966a\u4f34" : "\u5f00\u542f\u81ea\u52a8\u966a\u4f34",
                     action: "toggle-window-companion",
                 },
-                { label: "读取当前窗口", action: "load-window-candidates" },
+                { label: "\u8bfb\u53d6\u5f53\u524d\u7a97\u53e3", action: "load-window-candidates" },
             ],
         });
 
         if (state.windowCandidates.length) {
             cards.push({
-                title: "当前窗口候选",
-                body: "点一个就会把它追加到“窗口陪伴目标”，并自动打开窗口陪伴开关。",
+                title: "\u5f53\u524d\u7a97\u53e3\u5019\u9009",
+                body: "\u70b9\u4e00\u4e2a\u5c31\u4f1a\u628a\u5b83\u8ffd\u52a0\u5230\u201c\u7a97\u53e3\u966a\u4f34\u76ee\u6807\u201d\uff0c\u5e76\u81ea\u52a8\u6253\u5f00\u7a97\u53e3\u966a\u4f34\u5f00\u5173\u3002",
                 actions: state.windowCandidates.slice(0, 8).map((title, index) => ({
                     label: truncateLabel(title, 12),
                     action: `window-candidate::${index}`,
@@ -496,8 +595,8 @@ function renderSettingsHelper(activeGroup, currentValues) {
 
     if (activeGroup.id === "webui") {
         cards.push({
-            title: "WebUI 提醒",
-            body: "host、port 和访问保护这类设置更适合改完后重启插件再验证。这样更容易避开端口占用和旧实例残留。",
+            title: "WebUI \u63d0\u9192",
+            body: "host\u3001port \u548c\u8bbf\u95ee\u4fdd\u62a4\u8fd9\u7c7b\u8bbe\u7f6e\u66f4\u9002\u5408\u6539\u5b8c\u540e\u91cd\u542f\u63d2\u4ef6\u518d\u9a8c\u8bc1\u3002\u8fd9\u6837\u66f4\u5bb9\u6613\u907f\u5f00\u7aef\u53e3\u5360\u7528\u548c\u65e7\u5b9e\u4f8b\u6b8b\u7559\u3002",
             actions: [],
         });
     }
@@ -1087,9 +1186,11 @@ function renderRuntime() {
     const runtime = state.runtime;
     elements.runtimeStats.innerHTML = "";
     elements.runtimeInsights.innerHTML = "";
+    elements.runtimeMedia.innerHTML = "";
     if (!runtime) {
         elements.runtimeMeta.textContent = "尚未加载运行状态。";
         elements.runtimeStats.appendChild(cloneEmptyState());
+        renderRuntimeMedia(null);
         return;
     }
 
@@ -1103,7 +1204,14 @@ function renderRuntime() {
         ["观察记录", `${runtime.observation_count || 0} 条`],
         ["日记功能", runtime.enable_diary ? "开启" : "关闭"],
         ["学习功能", runtime.enable_learning ? "开启" : "关闭"],
-        ["识屏模式", runtime.use_shared_screenshot_dir ? "共享目录" : "实时截图"],
+        [
+            "识屏模式",
+            runtime.screen_recognition_mode
+                ? "录屏视频"
+                : runtime.use_shared_screenshot_dir
+                    ? "共享截图"
+                    : "实时截图",
+        ],
         ["求助识屏", formatRuntimeSwitch(runtime.enable_natural_language_screen_assist)],
         ["窗口陪伴", formatRuntimeSwitch(runtime.enable_window_companion)],
         ["陪伴目标", runtime.window_companion_active_title || "待命中"],
@@ -1134,6 +1242,7 @@ function renderRuntime() {
     });
     elements.presetSelect.value = String(runtime.current_preset_index ?? -1);
     renderRuntimeInsights(runtime);
+    renderRuntimeMedia(runtime);
 }
 async function loadConfig() {
     const data = await apiFetch("/api/config");
@@ -1417,7 +1526,7 @@ elements.selectAllObservations.addEventListener("change", () => {
     renderObservationList();
 });
 
-elements.clearSelectionButton.addEventListener("click", () => {
+elements.clearSelectionsButton.addEventListener("click", () => {
     state.selectedObservationIndices.clear();
     renderObservationList();
 });
@@ -1432,6 +1541,31 @@ elements.deleteSelectedButton.addEventListener("click", async () => {
         elements.observationMeta.textContent = "已删除选中的观察记录。";
     } catch (error) {
         elements.observationMeta.textContent = `批量删除失败: ${error.message}`;
+    }
+});
+
+elements.clearAllDataButton.addEventListener("click", async () => {
+    const confirmed = confirm("确定要清空所有资料吗？\n这将删除：观察记录、学习数据、长期记忆、纠正数据、日记等。\n此操作不可恢复！");
+    if (!confirmed) return;
+    
+    const doubleConfirmed = confirm("再次确认：此操作将永久删除所有数据，确定继续吗？");
+    if (!doubleConfirmed) return;
+    
+    try {
+        const result = await apiFetch("/api/data/clear", {
+            method: "POST",
+            body: JSON.stringify({ confirm: true }),
+        });
+        
+        if (result.success) {
+            alert(`已清空以下资料：${result.message}`);
+            state.selectedObservationIndices.clear();
+            await loadObservations();
+        } else {
+            alert(`清空失败：${result.error}`);
+        }
+    } catch (error) {
+        alert(`清空失败：${error.message}`);
     }
 });
 
@@ -1599,7 +1733,6 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
-
 
 
 
