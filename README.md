@@ -2,6 +2,8 @@
 
 面向 AstrBot 的屏幕伴侣插件。它会结合截图或录屏、多模态识别、环境感知、长期记忆、日记和 WebUI，为用户提供更自然的陪伴式互动。
 
+如果喜欢的话请点颗星星，祝您拉史顺畅，永不便秘）
+
 ## 主要功能
 
 - 自动识屏：按设定间隔和触发概率分析当前屏幕内容。
@@ -92,55 +94,6 @@ pip install -r requirements.txt
 ```
 
 4. 重启 AstrBot
-
-## 如何从零放置 `ffmpeg.exe` 到 `bin/ffmpeg.exe`
-
-如果你想直接使用插件内置查找路径，而不是自己配置系统 `PATH`，可以按下面的步骤处理：
-
-1. 下载 Windows 版 ffmpeg 压缩包。
-   - 可从 ffmpeg 官网跳转的 Windows 构建页下载。
-   - 下载内容通常是一个 `.zip` 或 `.7z` 压缩包。
-2. 解压压缩包。
-3. 在解压后的目录中找到 `ffmpeg.exe`。
-   - 常见位置类似：`解压目录\\bin\\ffmpeg.exe`
-4. 进入本插件目录，在插件根目录下确认有一个 `bin` 文件夹。
-   - 如果没有，就手动新建一个 `bin` 文件夹。
-5. 把刚才找到的 `ffmpeg.exe` 复制到这个位置：
-
-```text
-插件目录\bin\ffmpeg.exe
-```
-
-例如，如果你的插件目录是：
-
-```text
-C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_screen_companion
-```
-
-那么最终文件应该放在：
-
-```text
-C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_screen_companion\bin\ffmpeg.exe
-```
-
-放好后的目录结构大致如下：
-
-```text
-astrbot_plugin_screen_companion/
-├─ bin/
-│  └─ ffmpeg.exe
-├─ core/
-├─ web/
-├─ main.py
-└─ README.md
-```
-
-完成后重启 AstrBot，再执行一次 `/kpr` 或切换到录屏模式即可。如果仍提示未找到 `ffmpeg`，请先确认：
-
-- 文件名确实是 `ffmpeg.exe`
-- 文件确实放在 `bin` 文件夹里，而不是压缩包的其他子目录里
-- AstrBot 已经重启，拿到了最新文件
-- 你下载的是 Windows 可执行文件，而不是源码包
 
 ## 依赖
 
@@ -252,6 +205,7 @@ astrbot_plugin_screen_companion/
 - 不要用于监控他人或侵犯隐私。
 - 谨慎配置外部视觉 API 地址和密钥。
 - 如果开放 WebUI 外部 API，请务必启用认证。
+- 本插件不含恶意代码，但因个人原因使用插件造成信息泄露或损失的，责任由使用者承担。
 
 ## 开发建议
 
@@ -270,3 +224,8 @@ python scripts/check_text_health.py --strict
 - 录屏环境配置更灵活：支持通过 `ffmpeg_path` 指定本地 `ffmpeg.exe`，同时会优先查找插件目录下的 `bin/ffmpeg.exe`，最后再回退到系统 `PATH`。
 - WebUI 能力继续扩展：运行状态页新增最新截图 / 最新录屏预览，并补充了识屏模式、识别链路和运行态说明，方便直接确认当前素材来源和多模态工作方式。
 - 运行时稳定性得到修复：补充统一的运行时状态兜底初始化，降低插件热更新或旧实例复用时因新字段缺失导致的 `AttributeError` 风险。
+
+## 开发者信息
+
+- 开发者：menglimi/烛雨
+- QQ：995051631（纯小白，出问题建议先问豆包）
