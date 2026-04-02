@@ -2546,6 +2546,10 @@ function renderRuntime() {
         ["求助识屏", formatRuntimeSwitch(runtime.enable_natural_language_screen_assist)],
         ["窗口陪伴", formatRuntimeSwitch(runtime.enable_window_companion)],
         ["陪伴目标", runtime.window_companion_active_title || "待命中"],
+        [
+            "陪伴触发",
+            `${runtime.window_companion_effective_check_interval || runtime.current_check_interval || 0} 秒 / ${runtime.window_companion_effective_trigger_probability ?? runtime.current_trigger_probability ?? 0}%`,
+        ],
     ];
 
     cards.forEach(([label, value]) => {

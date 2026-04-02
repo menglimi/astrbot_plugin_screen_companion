@@ -1531,6 +1531,11 @@ class ScreenCompanionMediaMixin:
                 # 使用预设参数
                 check_interval = current_check_interval
                 probability = current_trigger_probability
+                if task_id == getattr(self, "WINDOW_COMPANION_TASK_ID", ""):
+                    self._sync_window_companion_effective_params(
+                        check_interval,
+                        probability,
+                    )
 
                 # 优先使用任务级别的自定义间隔
                 if interval is not None:
@@ -1588,6 +1593,11 @@ class ScreenCompanionMediaMixin:
                                 probability = new_probability
                                 logger.info(
                                     f"[任务 {task_id}] 预设参数已更新，触发概率变为 {probability}%"
+                                )
+                            if task_id == getattr(self, "WINDOW_COMPANION_TASK_ID", ""):
+                                self._sync_window_companion_effective_params(
+                                    check_interval,
+                                    probability,
                                 )
                         await asyncio.sleep(1)
                         elapsed += 1

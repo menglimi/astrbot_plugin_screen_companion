@@ -47,6 +47,30 @@ class ScreenCompanionProactiveMixin:
             return preset["check_interval"], preset["trigger_probability"]
         return self.check_interval, self.trigger_probability
 
+    def _sync_window_companion_effective_params(
+        self,
+        check_interval: int | None = None,
+        trigger_probability: int | None = None,
+    ) -> None:
+        """同步窗口陪伴当前继承到的主动触发参数。"""
+        if check_interval is None or trigger_probability is None:
+            check_interval, trigger_probability = self._get_current_preset_params()
+
+        self.window_companion_effective_check_interval = max(
+            10, int(check_interval or self.check_interval or 10)
+        )
+        self.window_companion_effective_trigger_probability = max(
+            0,
+            min(
+                100,
+                int(
+                    trigger_probability
+                    if trigger_probability is not None
+                    else getattr(self, "trigger_probability", 0)
+                ),
+            ),
+        )
+
     def _parse_window_companion_targets(self):
         """Parse window companion rules from config text."""
         self.parsed_window_companion_targets = []
@@ -662,6 +686,7 @@ class ScreenCompanionProactiveMixin:
             return False
 
         event = self._create_virtual_event(target)
+        self._sync_window_companion_effective_params()
         self.window_companion_active_title = window_title
         self.window_companion_active_target = target
         self.window_companion_active_rule = dict(rule or {})
@@ -711,6 +736,7 @@ class ScreenCompanionProactiveMixin:
         self.window_companion_active_target = ""
         self.window_companion_active_rule = {}
         self.window_companion_missing_since = 0.0
+        self._sync_window_companion_effective_params()
 
         if not self.auto_tasks:
             self.is_running = False

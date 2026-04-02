@@ -541,6 +541,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         if self.current_preset_index >= len(self.parsed_custom_presets):
             self.current_preset_index = -1
             self.plugin_config.current_preset_index = -1
+        self._sync_window_companion_effective_params()
         # 同步配置
         self.observation_storage = self.plugin_config.observation_storage
         self.max_observations = self.plugin_config.max_observations

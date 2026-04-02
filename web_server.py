@@ -3026,7 +3026,7 @@ class WebServer:
                 "window_companion_check_interval": {
                     "description": "窗口检查间隔",
                     "type": "int",
-                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。值越小越灵敏，值越大越省资源。",
+                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。这里只影响窗口命中速度；窗口陪伴真正发消息时，仍继承当前生效的触发间隔和触发概率。",
                     "default": 5,
                     "min": 2,
                     "max": 300,
@@ -3424,6 +3424,16 @@ class WebServer:
             current_interval, current_probability = preset_params[0], preset_params[1]
         else:
             current_interval, current_probability = default_interval, default_probability
+        window_companion_effective_interval = getattr(
+            self.plugin,
+            "window_companion_effective_check_interval",
+            current_interval,
+        )
+        window_companion_effective_probability = getattr(
+            self.plugin,
+            "window_companion_effective_trigger_probability",
+            current_probability,
+        )
         presets = []
         for index, preset in enumerate(getattr(self.plugin, "parsed_custom_presets", []) or []):
             presets.append(
@@ -3512,6 +3522,8 @@ class WebServer:
             "enable_window_companion": self._plugin_bool("enable_window_companion"),
             "window_companion_targets": getattr(self.plugin, "window_companion_targets", "") or "",
             "window_companion_check_interval": int(getattr(self.plugin, "window_companion_check_interval", 5) or 5),
+            "window_companion_effective_check_interval": int(window_companion_effective_interval),
+            "window_companion_effective_trigger_probability": int(window_companion_effective_probability),
             "window_companion_reattach_grace_seconds": int(
                 getattr(self.plugin, "window_companion_reattach_grace_seconds", 300) or 300
             ),
