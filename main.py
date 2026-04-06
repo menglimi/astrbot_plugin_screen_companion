@@ -3,6 +3,7 @@ import datetime
 import functools
 import inspect
 import os
+import re
 import shutil
 import time
 from typing import Any
@@ -55,6 +56,7 @@ def admin_required(func):
     return sync_wrapper
 
 class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin, ScreenCompanionMemoryMixin, ScreenCompanionInputStatsMixin, ScreenCompanionMediaMixin, ScreenCompanionCommandSupportMixin, Star):
+    SCREEN_SKILL_NAME = "screen_skill"
     LEGACY_DEFAULT_CUSTOM_TASK = "02:00 根据用户行为催促其尽快休息"
     DEFAULT_WEBUI_PORT = 6314
     SCREENSHOT_MODE = "screenshot"
@@ -263,6 +265,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 name="screen_recording_bootstrap",
             )
 
+    async def terminate(self) -> None:
+        """AstrBot 重载/卸载时的生命周期钩子。"""
+        logger.info("收到 terminate 生命周期回调，准备停止屏幕伙伴插件")
+        await self.stop()
+
     @staticmethod
     def _coerce_bool(value: Any) -> bool:
         if isinstance(value, bool):
@@ -389,6 +396,75 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 pass
         return False
 
+    def _message_addresses_bot(self, message_text: str) -> bool:
+        text = str(message_text or "").strip()
+        bot_name = str(getattr(self, "bot_name", "") or "").strip()
+        if not text or not bot_name:
+            return False
+
+        escaped_name = re.escape(bot_name)
+        address_patterns = (
+            rf"^\s*@?{escaped_name}(?:[，,。!！?？:：\s]|$)",
+            rf"(?:^|[\s,，。!！?？:：])@{escaped_name}(?:[，,。!！?？:：\s]|$)",
+            rf"^\s*(?:请|麻烦|欸|哎|诶)?\s*{escaped_name}(?:[，,。!！?？:：\s]|$)",
+        )
+        return any(
+            re.search(pattern, text, flags=re.IGNORECASE)
+            for pattern in address_patterns
+        )
+
+    def _allow_implicit_screen_skill_trigger(
+        self,
+        event: AstrMessageEvent,
+        message_text: str,
+    ) -> bool:
+        if not self._is_group_message_event(event):
+            return True
+        return self._message_addresses_bot(message_text)
+
+    def _build_screen_skill_prompt(self, user_request: str) -> str:
+        default_skill_prompt = (
+            f"你正在执行内部识屏技能 {self.SCREEN_SKILL_NAME}。"
+            "这是用户主动请求你看看当前屏幕。"
+            "请像聊天里顺手接一句那样回应，先说最关键的判断。"
+            "当用户是在问当前界面、这一步、这个报错、卡在哪里、下一步怎么做时，优先依据当前屏幕里的确定事实回答。"
+            "如果信息还不够，就明确说你现在能确定到哪一步，不要把推测说成看到了。"
+            "如果要提建议，只给当前最有用的一条，不要写成解说词、战报腔或固定的夸赞加总结模板。"
+            "不要提自动撤回或系统设定。"
+        )
+        custom_skill_prompt = str(
+            getattr(self, "screen_skill_prompt", "") or ""
+        ).strip()
+        parts = [default_skill_prompt]
+        if custom_skill_prompt:
+            parts.append(custom_skill_prompt)
+        user_request_text = str(user_request or "").strip()
+        if user_request_text:
+            parts.append(f"用户的原始请求：{user_request_text}")
+        return "\n".join(part for part in parts if part)
+
+    async def _invoke_screen_skill(
+        self,
+        event: AstrMessageEvent,
+        *,
+        request_prompt: str,
+        history_user_text: str,
+        task_id: str | None = None,
+    ) -> str:
+        ok, err_msg = self._check_env()
+        if not ok:
+            if self.debug:
+                logger.warning(f"识屏技能环境检查失败: {err_msg}")
+            return ""
+
+        custom_prompt = self._build_screen_skill_prompt(request_prompt)
+        return await self._run_screen_assist(
+            event,
+            task_id=task_id or self.SCREEN_SKILL_NAME,
+            custom_prompt=custom_prompt,
+            history_user_text=history_user_text,
+        )
+
     def _sync_all_config(self) -> None:
         """将配置对象同步到插件运行时字段。"""
         # 同步基础配置
@@ -399,7 +475,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.trigger_probability = self.plugin_config.trigger_probability
         self.active_time_range = self.plugin_config.active_time_range
         self.use_companion_mode = self._coerce_bool(self.plugin_config.use_companion_mode)
-        self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。')
+        self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '')
         self.capture_active_window = self._coerce_bool(self.plugin_config.capture_active_window)
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
         self.screen_recognition_mode = self._normalize_screen_recognition_mode(
@@ -515,6 +591,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.save_local = self._coerce_bool(self.plugin_config.save_local)
         self.enable_natural_language_screen_assist = (
             self._coerce_bool(self.plugin_config.enable_natural_language_screen_assist)
+        )
+        self.screen_skill_prompt = str(
+            getattr(self.plugin_config, "screen_skill_prompt", "") or ""
         )
         self.enable_window_companion = self._coerce_bool(self.plugin_config.enable_window_companion)
         self.window_companion_targets = self.plugin_config.window_companion_targets
@@ -701,7 +780,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
         if not active_task_ids or not self.is_running:
             suggestions.append("如果你想先直接体验一次，可以先用 /kp。")
-            suggestions.append("如果你想进入持续陪伴模式，可以执行 /kpi start。")
+            suggestions.append("如果你想开始自动观察，可以执行 /kpi start。")
             return suggestions
 
         suggestions.append("自动观察已经在运行；如果想检查学习是否生效，可以执行 /kpi learning。")
@@ -1197,17 +1276,13 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1)
     async def on_natural_language_screen_assist(self, event: AstrMessageEvent):
-        """处理自然语言触发的识屏求助。"""
+        """处理自然语言触发的内置识屏技能。"""
         if not getattr(self, "enable_natural_language_screen_assist", False):
             return
 
         try:
             message_text = str(getattr(event, "message_str", "") or "").strip()
             if not message_text or message_text.startswith("/"):
-                return
-
-            request_prompt = self._extract_screen_assist_prompt(message_text)
-            if not request_prompt:
                 return
 
             if not await self._ensure_admin_permission(
@@ -1223,6 +1298,17 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                     )
                 return
 
+            allow_implicit_trigger = self._allow_implicit_screen_skill_trigger(
+                event,
+                message_text,
+            )
+            request_prompt = self._extract_screen_assist_prompt(
+                message_text,
+                allow_implicit=allow_implicit_trigger,
+            )
+            if not request_prompt:
+                return
+
             cooldown_key = str(getattr(event, "unified_msg_origin", "") or getattr(event, "get_sender_id", lambda: "")())
             now_ts = time.time()
             last_trigger = float((getattr(self, "_screen_assist_cooldowns", {}) or {}).get(cooldown_key, 0.0))
@@ -1232,21 +1318,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 return
             self._screen_assist_cooldowns[cooldown_key] = now_ts
 
-            ok, err_msg = self._check_env()
-            if not ok:
-                if self.debug:
-                    logger.warning(f"自然语言识屏求助环境检查失败: {err_msg}")
-                return
-            custom_prompt = (
-                "这是用户主动请求你看看当前屏幕。"
-                "请像聊天里顺手接一句那样回应，先说最关键的判断。"
-                "如果要提建议，只给当前最有用的一条，不要写成解说词、战报腔或固定的夸赞加总结模板。"
-                "不要提自动撤回或系统设定。"
-            )
-            screen_result = await self._run_screen_assist(
+            screen_result = await self._invoke_screen_skill(
                 event,
                 task_id="nl_screen_assist",
-                custom_prompt=f"{custom_prompt}\n用户的原始请求：{request_prompt}",
+                request_prompt=request_prompt,
                 history_user_text=message_text,
             )
             if not screen_result:

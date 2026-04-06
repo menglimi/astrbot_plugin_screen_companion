@@ -878,35 +878,42 @@ class ScreenCompanionProactiveMixin:
                     await asyncio.sleep(0.6)
                 return
 
-            # 保存旧服务引用，在新服务启动成功后再停止
             old_server = self.web_server
+            old_server_active = bool(
+                old_server and getattr(old_server, "_started", False)
+            )
+            self.web_server = None
 
             try:
+                # 同端口重启时必须先停旧服务，否则新服务一定会撞端口。
+                if old_server_active:
+                    try:
+                        await old_server.stop()
+                        await asyncio.sleep(0.6)
+                    except Exception as e:
+                        logger.warning(f"停止旧 WebUI 服务时出错: {e}")
+
                 new_server = WebServer(self, host=self.webui_host, port=self.webui_port)
                 success = await new_server.start()
                 if success:
-                    # 新服务启动成功，更新引用并停止旧服务
                     self.web_server = new_server
-                    if old_server:
-                        try:
-                            await old_server.stop()
-                            await asyncio.sleep(0.6)
-                        except Exception as e:
-                            logger.warning(f"停止旧 WebUI 服务时出错: {e}")
                     logger.info("WebUI 重启成功")
                 else:
-                    self.web_server = None
                     logger.error(
                         f"WebUI 重启失败，原因: 无法绑定 {self.webui_host}:{self.webui_port}"
                     )
-                    # 启动失败，恢复旧服务引用
-                    if old_server and self.web_server != old_server:
-                        self.web_server = old_server
-                        logger.info("已恢复旧的 WebUI 服务")
+                    if old_server_active and old_server:
+                        restored = await old_server.start()
+                        if restored:
+                            self.web_server = old_server
+                            logger.info("新 WebUI 启动失败，已恢复旧的 WebUI 服务")
             except Exception as e:
-                self.web_server = None
                 logger.error(f"重启 WebUI 失败: {e}")
-                # 启动失败，恢复旧服务引用
-                if old_server and self.web_server != old_server:
-                    self.web_server = old_server
-                    logger.info("已恢复旧的 WebUI 服务")
+                if old_server_active and old_server:
+                    try:
+                        restored = await old_server.start()
+                        if restored:
+                            self.web_server = old_server
+                            logger.info("重启失败后已恢复旧的 WebUI 服务")
+                    except Exception as restore_error:
+                        logger.warning(f"恢复旧 WebUI 服务失败: {restore_error}")

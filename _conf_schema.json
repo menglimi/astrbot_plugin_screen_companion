@@ -8,8 +8,8 @@
   "system_prompt": {
     "description": "系统提示词",
     "type": "text",
-    "hint": "定义这位屏幕伙伴的人设、语气和边界。建议写成“你是谁 + 怎么说话 + 尽量别做什么”三段，改动后会明显影响主动观察、日记和求助回复。",
-    "default": "角色设定：窥屏助手\n把你正在使用的人格复制到这里",
+    "hint": "定义这位屏幕伙伴的人设、语气和边界。建议写成“你是谁 + 怎么说话 + 尽量别做什么”三段。留空时会优先沿用 AstrBot 当前人格，只有在取不到人格时才回退到插件内置默认提示词。",
+    "default": "",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
@@ -89,10 +89,22 @@
   "use_companion_mode": {
     "description": "使用陪伴模式",
     "type": "bool",
-    "hint": "开启后使用陪伴模式（持续陪伴），关闭则使用偷看模式（偶尔观察）。",
+    "hint": "只影响回复时附加的人格约束和语气，不等于开始自动观察，也不改变任务调度频率。开启后会更强调连续陪伴、顺势互动；关闭后则使用普通观察风格。",
     "default": false,
     "condition": {
       "enabled": true
+    }
+  },
+  "companion_prompt": {
+    "description": "陪伴模式专用人格",
+    "type": "text",
+    "hint": "仅在开启陪伴模式时使用。留空时会沿用上面的系统提示词或 AstrBot 当前人格，只额外追加陪伴式约束；填写后可单独定义陪伴模式下的人设和语气。",
+    "default": "",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "use_companion_mode": true
     }
   },
   "screen_recognition_mode": {
@@ -597,12 +609,24 @@
     }
   },
   "enable_natural_language_screen_assist": {
-    "description": "启用自然语言识屏求助",
+    "description": "启用自然语言识屏技能",
     "type": "bool",
-    "hint": "开启后，管理员在对话里明确表达“帮我看看/分析一下”这类求助时，Bot 会主动识屏后再回应。默认关闭，更不容易误触。",
+    "hint": "开启后，仅管理员可触发这项内置识屏技能。管理员在对话里明确求助，或在私聊里直接问“我现在在干嘛 / 这一步怎么做 / 这个报错什么意思 / 我卡哪了”这类当前界面问题时，Bot 会主动识屏后再回应。群聊里的隐式触发会更严格，通常需要明确叫到 Bot，默认关闭以减少误触。",
     "default": false,
     "condition": {
       "enabled": true
+    }
+  },
+  "screen_skill_prompt": {
+    "description": "内置识屏技能提示词",
+    "type": "text",
+    "hint": "给内置识屏技能补充额外约束，例如你希望它更像搭话、少下结论、优先回答报错或步骤。留空时会使用插件默认的识屏回复规则。",
+    "default": "",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "enable_natural_language_screen_assist": true
     }
   },
   "use_shared_screenshot_dir": {

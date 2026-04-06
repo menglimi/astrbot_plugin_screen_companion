@@ -12,6 +12,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from .app_descriptions import extract_app_name
 
 
 class ScreenCompanionMemoryMixin:
@@ -1398,7 +1399,7 @@ class ScreenCompanionMemoryMixin:
 
         return "\n".join(part for part in prompt_parts if part).strip()
 
-    def _extract_screen_assist_prompt(self, message: str) -> str:
+    def _extract_screen_assist_prompt(self, message: str, *, allow_implicit: bool = True) -> str:
         import re
 
         text = str(message or "").strip()
@@ -1425,22 +1426,7 @@ class ScreenCompanionMemoryMixin:
             "可以帮我",
             "能不能帮我",
         )
-        if not any(normalized.startswith(prefix) for prefix in request_prefixes):
-            return ""
-
-        # 应用启动器相关的排除标记，避免与应用启动器插件冲突
-        app_launcher_excludes = (
-            "打开", "启动", "运行", "开启", "打开一下", "启动一下", "运行一下",
-            "百度", "搜索", "查找", "查询", "搜索一下", "查一下", "搜一下",
-            "浏览器", "网页", "网站", "网址", "网页链接", "网站链接",
-            "http://", "https://", ".com", ".cn", ".org", ".net", ".io",
-            "直播", "直播间", "直播页", "动态", "最新动态", "动态页", "视频", "最新视频", "投稿",
-            "应用", "程序", "软件", "app",
-        )
-
-        # 检查是否包含应用启动器相关的关键词，避免冲突
-        if any(marker in normalized for marker in app_launcher_excludes):
-            return ""
+        has_request_prefix = any(normalized.startswith(prefix) for prefix in request_prefixes)
 
         request_markers = (
             "帮我看看",
@@ -1492,6 +1478,48 @@ class ScreenCompanionMemoryMixin:
             "装备",
             "日志",
         )
+        # 应用启动器相关的排除标记，避免与应用启动器插件冲突。
+        # 这里改成“更像启动器请求时才排除”，避免把“帮我看看这个网页报错”之类正常识屏求助误杀。
+        app_launcher_action_markers = (
+            "打开",
+            "启动",
+            "运行",
+            "开启",
+            "搜索",
+            "查找",
+            "查询",
+            "搜一下",
+            "查一下",
+            "打开一下",
+            "启动一下",
+            "运行一下",
+        )
+        app_launcher_target_markers = (
+            "浏览器",
+            "网页",
+            "网站",
+            "网址",
+            "网页链接",
+            "网站链接",
+            "http://",
+            "https://",
+            ".com",
+            ".cn",
+            ".org",
+            ".net",
+            ".io",
+            "百度",
+            "直播间",
+            "直播页",
+            "动态页",
+            "最新动态",
+            "最新视频",
+            "投稿",
+            "应用",
+            "程序",
+            "软件",
+            "app",
+        )
         negative_markers = (
             "不用看",
             "别看",
@@ -1508,14 +1536,81 @@ class ScreenCompanionMemoryMixin:
         if any(marker in normalized for marker in negative_markers):
             return ""
 
-        has_request = any(marker in normalized for marker in request_markers)
+        has_request = has_request_prefix or any(marker in normalized for marker in request_markers)
         has_screen_context = any(marker in normalized for marker in screen_context_markers)
         has_task_context = any(marker in normalized for marker in task_context_markers)
-
-        if not has_request:
+        looks_like_launcher_request = (
+            has_request_prefix
+            and any(marker in normalized for marker in app_launcher_action_markers)
+            and any(marker in normalized for marker in app_launcher_target_markers)
+            and not has_screen_context
+            and not has_task_context
+        )
+        if looks_like_launcher_request:
             return ""
 
-        if not (has_screen_context or has_task_context):
+        implicit_patterns = (
+            r"我(现在)?(在干嘛|在做什么)",
+            r"(这|当前|现在).{0,8}(一步|页面|页|界面|题|关|关卡).{0,12}(怎么|怎么办|该怎么|该点哪里|点哪里)",
+            r"(这个|这条|这段)(报错|错误).{0,12}(什么意思|怎么解决|怎么办|咋办)",
+            r"(我)?(现在)?卡(住了|哪了|在哪|在这|这里)",
+            r"(问题出在哪|哪里有问题|哪错了|哪里不对)",
+            r"(接下来|下一步).{0,8}(怎么|怎么办|该怎么)",
+            r"我(现在)?该怎么办",
+            r"(这里|这一页|这页|这个界面).{0,10}(该点哪里|点哪里|看哪里)",
+        )
+        explicit_scene_questions = (
+            "我现在在干嘛",
+            "我现在在做什么",
+            "我在干嘛",
+            "我在做什么",
+            "我卡住了",
+            "我卡哪了",
+            "我卡在哪",
+            "这一步怎么做",
+            "接下来怎么做",
+            "下一步怎么做",
+            "这个报错什么意思",
+            "这个错误什么意思",
+            "这一步该点哪里",
+            "这一页该点哪里",
+            "这页该点哪里",
+            "我现在该怎么办",
+        )
+        strict_visual_markers = (
+            "现在",
+            "当前",
+            "这一步",
+            "这里",
+            "这个",
+            "这页",
+            "这一页",
+            "界面",
+            "页面",
+            "屏幕",
+            "画面",
+            "窗口",
+            "截图",
+            "卡住了",
+            "卡哪了",
+            "卡在哪",
+        )
+        short_message_limit = 36
+        implicit_matched = any(
+            marker in normalized for marker in explicit_scene_questions
+        ) or any(re.search(pattern, normalized) for pattern in implicit_patterns)
+        has_visual_anchor = any(marker in normalized for marker in strict_visual_markers)
+        has_implicit_request = (
+            allow_implicit
+            and len(normalized) <= short_message_limit
+            and implicit_matched
+            and has_visual_anchor
+        )
+
+        if not has_request and not has_implicit_request:
+            return ""
+
+        if not has_implicit_request and not (has_screen_context or has_task_context):
             return ""
 
         return text[:160]
@@ -4053,6 +4148,9 @@ class ScreenCompanionMemoryMixin:
         custom_app_name = self._match_custom_activity_app_name(normalized_window)
         if custom_app_name:
             return custom_app_name
+        detected_app_name = extract_app_name(normalized_window)
+        if detected_app_name:
+            return self._normalize_window_title(detected_app_name)[:48]
         lowered = f" {normalized_window.casefold()} "
         for label, aliases in self.ACTIVITY_APP_ALIASES:
             if any(alias.casefold() in lowered for alias in aliases):

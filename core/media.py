@@ -20,6 +20,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import BaseMessageComponent, Image, Plain
 
 from ..web_server import WebServer
+from .app_descriptions import describe_window_activity, infer_scene_from_window_title
 
 class ScreenCompanionMediaMixin:
     def _parse_user_preferences(self):
@@ -223,12 +224,179 @@ class ScreenCompanionMediaMixin:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
 
+    @staticmethod
+    def _normalize_screen_fact_text(text: str, limit: int = 72) -> str:
+        import re
+
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+
+        normalized = normalized.replace("\r", "\n")
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized = normalized.strip(" -:：;；,.，。")
+        if len(normalized) > limit:
+            normalized = normalized[: limit - 3].rstrip("，。；;,. ") + "..."
+        return normalized
+
+    def _extract_screen_fact_lines(
+        self,
+        recognition_text: str,
+        *,
+        limit: int = 4,
+    ) -> list[str]:
+        import re
+
+        text = str(recognition_text or "").strip()
+        if not text:
+            return []
+
+        raw_segments: list[str] = []
+        for line in text.replace("\r", "\n").split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            raw_segments.extend(re.split(r"[；;]", stripped))
+
+        filtered: list[str] = []
+        seen: set[str] = set()
+        skip_markers = (
+            "建议",
+            "可以先",
+            "可先",
+            "下一步",
+            "提醒",
+            "注意",
+            "优先",
+            "最好",
+            "不妨",
+            "也许",
+            "可能",
+        )
+        prefix_pattern = re.compile(r"^[\-\*\d\.\)\(（）：:、\s]+")
+
+        for segment in raw_segments:
+            candidate = prefix_pattern.sub("", str(segment or "").strip())
+            candidate = self._normalize_screen_fact_text(candidate)
+            if not candidate:
+                continue
+            if any(marker in candidate for marker in skip_markers):
+                continue
+            signature = candidate.casefold()
+            if signature in seen:
+                continue
+            seen.add(signature)
+            filtered.append(candidate)
+            if len(filtered) >= max(1, int(limit or 1)):
+                break
+
+        return filtered
+
+    def _build_screen_fact_digest(
+        self,
+        *,
+        scene: str,
+        active_window_title: str,
+        recognition_text: str,
+        media_kind: str,
+        latest_window_title: str = "",
+        clip_active_window_title: str = "",
+    ) -> dict[str, Any]:
+        normalized_scene = str(scene or "").strip()
+        normalized_window = self._normalize_window_title(active_window_title)
+        normalized_latest_window = self._normalize_window_title(latest_window_title)
+        normalized_clip_window = self._normalize_window_title(clip_active_window_title)
+        fact_lines = self._extract_screen_fact_lines(recognition_text)
+        activity_hint = describe_window_activity(normalized_window, normalized_scene)
+        activity_scene = str(activity_hint.get("scene", "") or "").strip()
+        app_name = str(activity_hint.get("app_name", "") or "").strip()
+        display_title = str(activity_hint.get("display_title", "") or "").strip()
+        activity_description = str(activity_hint.get("description", "") or "").strip()
+
+        summary_lines: list[str] = []
+        effective_scene = normalized_scene or activity_scene
+        if effective_scene and effective_scene != "未知":
+            summary_lines.append(f"场景：{effective_scene}")
+        if app_name:
+            summary_lines.append(f"应用：{app_name}")
+        if normalized_window:
+            summary_lines.append(f"当前窗口：{normalized_window}")
+        if display_title:
+            summary_lines.append(f"标题：{display_title}")
+        if activity_description:
+            summary_lines.append(f"活动：{activity_description}")
+        if (
+            str(media_kind or "").strip().lower() == "video"
+            and normalized_latest_window
+            and normalized_latest_window.casefold() != normalized_window.casefold()
+        ):
+            summary_lines.append(f"最新窗口：{normalized_latest_window}")
+        elif (
+            str(media_kind or "").strip().lower() == "video"
+            and normalized_clip_window
+            and normalized_clip_window.casefold() != normalized_window.casefold()
+        ):
+            summary_lines.append(f"录屏起点窗口：{normalized_clip_window}")
+
+        for fact in fact_lines:
+            summary_lines.append(f"观察：{fact}")
+
+        summary_lines = summary_lines[:6]
+        summary = "；".join(summary_lines)
+        prompt_block = ""
+        if summary_lines:
+            prompt_block = "可直接依赖的状态摘要：\n" + "\n".join(
+                f"- {line}" for line in summary_lines
+            )
+
+        return {
+            "summary": summary,
+            "summary_lines": summary_lines,
+            "fact_lines": fact_lines,
+            "prompt_block": prompt_block,
+            "app_name": app_name,
+            "display_title": display_title,
+            "activity_description": activity_description,
+            "scene": effective_scene,
+        }
+
+    def _build_grounded_screen_reply_guide(
+        self,
+        *,
+        fact_digest: dict[str, Any] | None,
+        custom_prompt: str,
+        context_count: int,
+    ) -> str:
+        fact_lines = list((fact_digest or {}).get("summary_lines", []) or [])
+        guide_lines = [
+            "事实约束：优先围绕上面的状态摘要回答，不要跳过事实直接自由发挥。",
+            "表达顺序：先用一句自然的话点出当前最确定的观察，再补一个贴着当前任务的判断或建议。",
+            "如果只能推测，必须显式使用“像是”“看起来”“如果我没看错”这类措辞标注不确定性。",
+            "不要编造未看到的具体文档内容、聊天对象、按钮点击结果、音频内容或任务结论。",
+            "整体尽量控制在 1 到 3 句，不要写成列表、播报或客服通知。",
+        ]
+        if fact_lines:
+            guide_lines.append("至少引用摘要里的 1 到 2 个事实点，让回复听起来像真正在看当前画面。")
+        else:
+            guide_lines.append("如果缺少足够事实，就简短承认没看清，不要硬猜。")
+        if custom_prompt:
+            guide_lines.append("用户有明确问题时，先回答问题，再补一句与当前画面贴合的观察。")
+        if context_count > 0:
+            guide_lines.append("延续当前对话语气，但不要重复上一条已经说过的观察。")
+        return "\n".join(guide_lines)
+
     def _soften_screen_reply_phrasing(self, text: str) -> str:
         softened = str(text or "").strip()
         if not softened:
             return ""
 
         replacements = (
+            ("根据当前屏幕内容，", ""),
+            ("根据当前画面，", ""),
+            ("从当前屏幕来看，", ""),
+            ("从当前画面来看，", ""),
+            ("从画面看，", ""),
+            ("结合当前画面，", ""),
             ("建议你可以", "你可以"),
             ("建议你先", "你可以先"),
             ("建议你", "你可以"),
@@ -2170,6 +2338,20 @@ class ScreenCompanionMediaMixin:
 
     async def _get_persona_prompt(self, umo: str = None) -> str:
         """获取屏幕伴侣的系统提示词"""
+        def _normalize_prompt_override(value: Any) -> str:
+            text = str(value or "").strip()
+            if not text:
+                return ""
+
+            placeholder_markers = (
+                "把你正在使用的人格复制到这里",
+                "角色设定：窥屏助手",
+            )
+            normalized_text = text.replace("\r\n", "\n").strip()
+            if any(marker in normalized_text for marker in placeholder_markers):
+                return ""
+            return normalized_text
+
         base_prompt = ""
         try:
             if hasattr(self.context, "persona_manager"):
@@ -2181,21 +2363,26 @@ class ScreenCompanionMediaMixin:
         except Exception as e:
             logger.debug(f"获取屏幕尺寸失败: {e}")
 
+        base_prompt = _normalize_prompt_override(base_prompt)
+        config_prompt = _normalize_prompt_override(getattr(self, "system_prompt", ""))
+        companion_prompt = _normalize_prompt_override(
+            getattr(self, "companion_prompt", "")
+        )
+
         # 检查是否为陪伴模式
         if self.use_companion_mode:
-            companion_prompt = getattr(self, 'companion_prompt', None)
-            if companion_prompt:
-                companion_supplemental_guide = (
-                    "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
-                    "你可以偶尔轻轻表达自己也想和用户一起看点内容、玩一局游戏或做个小测试，"
-                    "但必须低频、自然，不要打断正事，更不能凭空捏造共同经历。"
-                )
-                return f"{companion_prompt.rstrip()}{companion_supplemental_guide}"
+            companion_supplemental_guide = (
+                "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
+                "你可以偶尔轻轻表达自己也想和用户一起看点内容、玩一局游戏或做个小测试，"
+                "但必须低频、自然，不要打断正事，更不能凭空捏造共同经历。"
+            )
+            effective_prompt = (
+                companion_prompt or base_prompt or config_prompt or DEFAULT_SYSTEM_PROMPT
+            )
+            return f"{effective_prompt.rstrip()}{companion_supplemental_guide}"
 
-        if not base_prompt:
-            config_prompt = self.system_prompt
-            if config_prompt:
-                base_prompt = config_prompt
+        if not base_prompt and config_prompt:
+            base_prompt = config_prompt
 
         if not base_prompt:
             base_prompt = DEFAULT_SYSTEM_PROMPT
@@ -3667,6 +3854,12 @@ class ScreenCompanionMediaMixin:
         if not window_title:
             return "未知"
 
+        app_scene = infer_scene_from_window_title(window_title)
+        if app_scene:
+            if app_scene == "浏览":
+                return self._classify_browser_content(window_title)
+            return app_scene
+
         title_lower = window_title.lower()
 
         keyword_groups = {
@@ -4252,8 +4445,31 @@ class ScreenCompanionMediaMixin:
                     else "provider_fallback"
                 )
                 analysis_trace["analysis_material_kind"] = effective_media_kind
+            fact_digest = self._build_screen_fact_digest(
+                scene=scene,
+                active_window_title=active_window_title,
+                recognition_text=recognition_text,
+                media_kind=media_kind,
+                latest_window_title=str(
+                    capture_context.get("latest_window_title", "") or ""
+                ),
+                clip_active_window_title=str(
+                    capture_context.get("clip_active_window_title", "") or ""
+                ),
+            )
+            analysis_trace["fact_summary"] = str(fact_digest.get("summary", "") or "")
+            analysis_trace["fact_lines"] = list(fact_digest.get("fact_lines", []) or [])
+            analysis_trace["app_name"] = str(fact_digest.get("app_name", "") or "")
+            analysis_trace["display_title"] = str(
+                fact_digest.get("display_title", "") or ""
+            )
+            analysis_trace["activity_description"] = str(
+                fact_digest.get("activity_description", "") or ""
+            )
 
             prompt_parts: list[str] = []
+            if fact_digest.get("prompt_block"):
+                prompt_parts.append(str(fact_digest.get("prompt_block", "")))
             if effective_use_external_vision:
                 prompt_parts.extend(
                     [
@@ -4377,6 +4593,14 @@ class ScreenCompanionMediaMixin:
                 analysis_trace["rest_reminder_planned"] = True
                 capture_context["_rest_reminder_planned"] = True
                 capture_context["_rest_reminder_info"] = dict(rest_reminder_info or {})
+
+            prompt_parts.append(
+                self._build_grounded_screen_reply_guide(
+                    fact_digest=fact_digest,
+                    custom_prompt=custom_prompt,
+                    context_count=len(contexts),
+                )
+            )
 
             prompt_parts.append(
                 self._build_companion_response_guide(

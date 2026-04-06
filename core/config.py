@@ -41,8 +41,8 @@ class PluginConfig(BaseModel):
     # === 自定义预设配置 ===
     custom_presets: str = ""  # 格式: 预设1名称|间隔|概率,预设2名称|间隔|概率
     current_preset_index: int = 0  # 当前使用的预设索引
-    use_companion_mode: bool = False  # 是否使用陪伴模式（开启为陪伴模式，关闭为偷看模式）
-    companion_prompt: str = "你需要想象自己真实地将持续待在用户身边并与用户一起观看其屏幕内容，并实时地与用户进行互动。"
+    use_companion_mode: bool = False  # 是否额外追加陪伴式互动约束，不影响自动观察开关
+    companion_prompt: str = ""  # 陪伴模式专用人格，留空则沿用当前 AstrBot 人格或 system_prompt
     capture_active_window: bool = False  # 是否只截取活动窗口
     bot_vision_quality: int = 85
     image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
@@ -94,6 +94,7 @@ class PluginConfig(BaseModel):
     proactive_target: str = ""
     save_local: bool = True
     enable_natural_language_screen_assist: bool = False
+    screen_skill_prompt: str = ""  # 内置识屏技能提示词，留空时使用默认约束
     enable_window_companion: bool = False
     window_companion_targets: str = ""
     window_companion_check_interval: int = 5
@@ -115,7 +116,7 @@ class PluginConfig(BaseModel):
     max_observations: int = 40
     interaction_frequency: int = 5
     image_quality: int = 70
-    system_prompt: str = "你需要想象自己真实地为了满足好奇心而偷偷查看了一眼用户的屏幕，然后与用户进行互动。"
+    system_prompt: str = ""  # 留空则优先沿用当前 AstrBot 人格，最后回退到插件内置默认人格
     bot_appearance: str = ""  # Bot的外形描述，用于在屏幕中识别自己
 
     # === WebUI 管理界面 ===
