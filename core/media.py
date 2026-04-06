@@ -3229,6 +3229,32 @@ class ScreenCompanionMediaMixin:
                 logger.debug(f"读取 AstrBot provider 配置失败 {path}: {e}")
         return {}
 
+    def _get_astrbot_image_caption_settings(self) -> dict[str, str]:
+        registry = self._load_astrbot_provider_registry()
+        provider_settings = registry.get("provider_settings", {}) or {}
+        provider_ltm_settings = registry.get("provider_ltm_settings", {}) or {}
+
+        provider_id = str(
+            provider_settings.get("default_image_caption_provider_id", "") or ""
+        ).strip()
+        if not provider_id and self._coerce_bool(
+            provider_ltm_settings.get("image_caption", False)
+        ):
+            provider_id = str(
+                provider_ltm_settings.get("image_caption_provider_id", "") or ""
+            ).strip()
+        if not provider_id:
+            provider_id = str(registry.get("image_caption_provider_id", "") or "").strip()
+
+        prompt = str(provider_settings.get("image_caption_prompt", "") or "").strip()
+        if not prompt:
+            prompt = str(registry.get("image_caption_prompt", "") or "").strip()
+
+        return {
+            "provider_id": provider_id,
+            "prompt": prompt,
+        }
+
     @staticmethod
     def _looks_like_gemini_model(model_name: str) -> bool:
         return "gemini" in str(model_name or "").strip().lower()
@@ -3271,6 +3297,66 @@ class ScreenCompanionMediaMixin:
         except Exception as e:
             logger.debug(f"判断 Gemini 原生视频能力失败: {e}")
             return False
+
+    async def _call_astrbot_image_caption_provider(
+        self,
+        *,
+        media_bytes: bytes,
+        mime_type: str,
+        scene: str,
+        active_window_title: str,
+    ) -> str:
+        settings = self._get_astrbot_image_caption_settings()
+        provider_id = str(settings.get("provider_id", "") or "").strip()
+        if not provider_id:
+            return ""
+
+        getter = getattr(self.context, "get_provider_by_id", None)
+        if not callable(getter):
+            logger.debug("当前 AstrBot context 不支持 get_provider_by_id，跳过图片转述 provider")
+            return ""
+
+        provider = None
+        try:
+            provider = getter(provider_id)
+        except Exception as e:
+            logger.debug(f"获取图片转述 provider 失败 {provider_id}: {e}")
+            return ""
+
+        if not provider:
+            logger.warning(f"找不到 AstrBot 图片转述 provider: {provider_id}")
+            return ""
+
+        data_url = self._build_data_url(media_bytes, mime_type)
+        base_prompt = self._build_vision_prompt(scene, active_window_title)
+        caption_prompt = str(settings.get("prompt", "") or "").strip()
+        prompt_parts = []
+        if caption_prompt:
+            prompt_parts.append(caption_prompt)
+        if base_prompt and base_prompt not in prompt_parts:
+            prompt_parts.append(base_prompt)
+        prompt = "\n\n".join(part for part in prompt_parts if part).strip()
+        if not prompt:
+            prompt = "请用中文简洁描述这张图片内容。"
+
+        try:
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    image_urls=[data_url],
+                ),
+                timeout=60.0,
+            )
+        except Exception as e:
+            logger.warning(f"AstrBot 图片转述 provider 调用失败 {provider_id}: {e}")
+            return ""
+
+        completion_text = str(
+            getattr(response, "completion_text", "") or getattr(response, "text", "") or ""
+        ).strip()
+        if completion_text:
+            logger.info(f"已使用 AstrBot 图片转述 provider 识屏: {provider_id}")
+        return completion_text
 
     def _resolve_provider_runtime_info(
         self,
@@ -3633,6 +3719,21 @@ class ScreenCompanionMediaMixin:
             }
         ]
 
+        def _looks_like_context_image_payload_error(error: Exception) -> bool:
+            error_text = str(error or "").lower()
+            if not error_text:
+                return False
+            markers = (
+                "image_url",
+                "unknown variant",
+                "failed to deserialize",
+                "invalid_request_error",
+                "messages[",
+                "expected `text`",
+                "expected 'text'",
+            )
+            return any(marker in error_text for marker in markers)
+
         try:
             return await provider.text_chat(
                 prompt="",
@@ -3649,6 +3750,18 @@ class ScreenCompanionMediaMixin:
             raise RuntimeError(
                 "当前 AstrBot provider 不支持直接视频多模态上下文，请开启外部视觉 API。"
             )
+        except Exception as e:
+            if media_kind == "image" and _looks_like_context_image_payload_error(e):
+                logger.warning(
+                    "当前 provider 的多模态 contexts 载荷未被后端接受，"
+                    "正在改用 image_urls 方式重试图片识别。"
+                )
+                return await provider.text_chat(
+                    prompt=interaction_prompt,
+                    system_prompt=system_prompt,
+                    image_urls=[data_url],
+                )
+            raise
 
     async def _run_screen_assist(
         self,
@@ -4197,18 +4310,45 @@ class ScreenCompanionMediaMixin:
         use_external_vision: bool,
         scene: str,
         active_window_title: str,
-    ) -> str:
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "text": "",
+            "used_text_pipeline": False,
+            "source": "",
+        }
+
+        media_kind = str(capture_context.get("media_kind", "image") or "image")
+        mime_type = str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg")
+        media_bytes = capture_context.get("media_bytes", b"") or b""
+
+        if media_kind == "image" and media_bytes:
+            recognition_text = await self._call_astrbot_image_caption_provider(
+                media_bytes=media_bytes,
+                mime_type=mime_type,
+                scene=scene,
+                active_window_title=active_window_title,
+            )
+            recognition_text = self._compress_recognition_text(recognition_text)
+            if recognition_text and not self._is_screen_error_text(recognition_text):
+                result["text"] = recognition_text
+                result["used_text_pipeline"] = True
+                result["source"] = "astrbot_image_caption"
+                return result
+
         if not use_external_vision:
-            return ""
+            return result
 
         recognition_text = await self._call_external_vision_api(
-            capture_context.get("media_bytes", b"") or b"",
-            media_kind=str(capture_context.get("media_kind", "image") or "image"),
-            mime_type=str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg"),
+            media_bytes,
+            media_kind=media_kind,
+            mime_type=mime_type,
             scene=scene,
             active_window_title=active_window_title,
         )
-        return self._compress_recognition_text(recognition_text)
+        result["text"] = self._compress_recognition_text(recognition_text)
+        result["used_text_pipeline"] = True
+        result["source"] = "external_vision_api"
+        return result
 
     async def _request_screen_interaction(
         self,
@@ -4410,11 +4550,16 @@ class ScreenCompanionMediaMixin:
                         if use_external_vision:
                             recognition_capture_context = sampled_capture_context
 
-            recognition_text = await self._recognize_screen_material(
+            recognition_result = await self._recognize_screen_material(
                 capture_context=recognition_capture_context,
                 use_external_vision=effective_use_external_vision,
                 scene=scene,
                 active_window_title=active_window_title,
+            )
+            recognition_text = str(recognition_result.get("text", "") or "")
+            recognition_source = str(recognition_result.get("source", "") or "")
+            effective_use_external_vision = bool(
+                recognition_result.get("used_text_pipeline", False)
             )
             if (
                 media_kind == "video"
@@ -4423,17 +4568,27 @@ class ScreenCompanionMediaMixin:
                 and recognition_capture_context is sampled_capture_context
                 and self._looks_uncertain_screen_result(recognition_text)
             ):
-                recognition_text = await self._recognize_screen_material(
+                recognition_result = await self._recognize_screen_material(
                     capture_context=capture_context,
                     use_external_vision=effective_use_external_vision,
                     scene=scene,
                     active_window_title=active_window_title,
                 )
+                recognition_text = str(recognition_result.get("text", "") or "")
+                recognition_source = str(recognition_result.get("source", "") or "")
+                effective_use_external_vision = bool(
+                    recognition_result.get("used_text_pipeline", False)
+                )
                 analysis_trace["analysis_material_kind"] = "video"
                 analysis_trace["used_full_video"] = True
                 material_label = "录屏视频"
 
-            if effective_use_external_vision and self._is_screen_error_text(recognition_text):
+            analysis_trace["recognition_source"] = recognition_source
+            if (
+                recognition_source == "external_vision_api"
+                and effective_use_external_vision
+                and self._is_screen_error_text(recognition_text)
+            ):
                 logger.warning(
                     f"[任务 {task_id}] 外部视觉识别失败，尝试回退到当前 provider 多模态链路: {recognition_text}"
                 )

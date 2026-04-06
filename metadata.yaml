@@ -2,6 +2,6 @@ name: astrbot_plugin_screen_companion
 display_name: 我会一直看着你
 author: menglimi
 description: astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能让bot随机地监视你的屏幕，并根据场景与用户进行互动。插件能监控音量、电脑状态以及你打开的窗口并进行合适的互动，且会根据每天的观察记录完成日记。此外，插件还拥有一个完善的webUI界面。灵感来源于妹居物语，适配live2D桌宠。
-version: 2.9.5
+version: 2.9.6
 repo: https://github.com/menglimi/astrbot_plugin_screen_companion
 icon: logo.png
