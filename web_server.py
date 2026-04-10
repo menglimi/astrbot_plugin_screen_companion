@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "2.9.7"
+    APP_VERSION = "2.9.8"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000

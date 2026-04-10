@@ -426,10 +426,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         default_skill_prompt = (
             f"你正在执行内部识屏技能 {self.SCREEN_SKILL_NAME}。"
             "这是用户主动请求你看看当前屏幕。"
-            "请像聊天里顺手接一句那样回应，先说最关键的判断。"
-            "当用户是在问当前界面、这一步、这个报错、卡在哪里、下一步怎么做时，优先依据当前屏幕里的确定事实回答。"
+            "请像聊天里顺手接一句那样回应，先对齐用户这轮到底想确认什么，再说最关键的判断。"
+            "先判断用户的问题目标是什么，再判断当前屏幕是否真的覆盖了这个目标。"
+            "如果当前屏幕足以回答，就依据屏幕里的确定事实回答；如果还没覆盖到用户要找的东西，就直接说明还没看到，并追问它在哪个窗口/页面，或让用户切到那里。"
             "如果信息还不够，就明确说你现在能确定到哪一步，不要把推测说成看到了。"
-            "如果要提建议，只给当前最有用的一条，不要写成解说词、战报腔或固定的夸赞加总结模板。"
+            "如果要提建议，只给当前最有用的一条，不要写成解说词、战报腔或固定的夸赞加总结模板，也不要先机械复述一遍屏幕。"
             "不要提自动撤回或系统设定。"
         )
         custom_skill_prompt = str(
@@ -457,12 +458,24 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 logger.warning(f"识屏技能环境检查失败: {err_msg}")
             return ""
 
+        use_recording_mode = self._use_screen_recording_mode()
+        capture_timeout = self._get_capture_context_timeout(
+            "video" if use_recording_mode else "image"
+        )
+        capture_context = await asyncio.wait_for(
+            self._capture_recognition_context(
+                force_fresh_capture=not use_recording_mode,
+                force_fresh_recording=use_recording_mode,
+            ),
+            timeout=capture_timeout,
+        )
         custom_prompt = self._build_screen_skill_prompt(request_prompt)
         return await self._run_screen_assist(
             event,
             task_id=task_id or self.SCREEN_SKILL_NAME,
             custom_prompt=custom_prompt,
             history_user_text=history_user_text,
+            capture_context=capture_context,
         )
 
     def _sync_all_config(self) -> None:
@@ -1152,7 +1165,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
         try:
             capture_context = await asyncio.wait_for(
-                self._capture_screenshot_context(), timeout=20.0
+                self._capture_screenshot_context(force_fresh_capture=True), timeout=20.0
             )
             screen_result = await self._run_screen_assist(
                 event,

@@ -155,42 +155,11 @@ class ScreenCompanionMediaMixin:
         allow_rest_hint: bool = False,
         task_id: str = "",
     ):
-        """清理沉浸感较差的播报式开场，尤其是视频和阅读场景。"""
+        """只做轻量清理，不主动塑造固定回复风格。"""
         response_text = str(response_text or "").strip()
         response_text = self._strip_response_markdown_artifacts(response_text)
         recent_contexts = list(contexts or [])
         has_recent_context = bool(recent_contexts)
-
-        # 常见的播报式开场，需要清理
-        opening_phrases = [
-            "我看到你在",
-            "你现在正在",
-            "你在",
-            "我观察到你在",
-            "我注意到你在",
-            "看到你在",
-            "观察到你在",
-            "注意到你在"
-        ]
-        
-        # 针对视频和阅读场景的特殊处理
-        if scene in ["视频", "阅读"]:
-            # 对于这些场景，更需要减少播报感
-            for phrase in opening_phrases:
-                if response_text.startswith(phrase):
-                    # 移除开场短语
-                    response_text = response_text[len(phrase):].strip()
-                    # 如果以"在"开头，也移除
-                    if response_text.startswith("在"):
-                        response_text = response_text[1:].strip()
-                    break
-        else:
-            # 对于其他场景，适度清理
-            for phrase in opening_phrases:
-                if response_text.startswith(phrase):
-                    # 移除开场短语
-                    response_text = response_text[len(phrase):].strip()
-                    break
 
         response_text = self._strip_repeated_companion_opening(
             response_text,
@@ -203,9 +172,6 @@ class ScreenCompanionMediaMixin:
             and self._has_recent_rest_cue(recent_contexts, task_id=task_id)
         ):
             response_text = self._strip_rest_cue_sentences(response_text)
-
-        response_text = self._soften_screen_reply_phrasing(response_text)
-        response_text = self._trim_overstyled_screen_sentences(response_text)
 
         return response_text.strip()
 
@@ -369,20 +335,297 @@ class ScreenCompanionMediaMixin:
     ) -> str:
         fact_lines = list((fact_digest or {}).get("summary_lines", []) or [])
         guide_lines = [
-            "事实约束：优先围绕上面的状态摘要回答，不要跳过事实直接自由发挥。",
-            "表达顺序：先用一句自然的话点出当前最确定的观察，再补一个贴着当前任务的判断或建议。",
-            "如果只能推测，必须显式使用“像是”“看起来”“如果我没看错”这类措辞标注不确定性。",
-            "不要编造未看到的具体文档内容、聊天对象、按钮点击结果、音频内容或任务结论。",
-            "整体尽量控制在 1 到 3 句，不要写成列表、播报或客服通知。",
+            "只根据当前画面与上文里能确认的事实回答。",
+            "如果看不清或证据不够，直接承认不确定，不要硬猜。",
+            "不要编造未看到的具体结果、文档内容、按钮状态、聊天对象或任务结论。",
         ]
         if fact_lines:
-            guide_lines.append("至少引用摘要里的 1 到 2 个事实点，让回复听起来像真正在看当前画面。")
+            guide_lines.append("回答时可以引用当前画面里的事实，但不要为了像在识屏而机械复述。")
         else:
-            guide_lines.append("如果缺少足够事实，就简短承认没看清，不要硬猜。")
+            guide_lines.append("当前事实不足时，优先澄清或请用户切到相关页面。")
         if custom_prompt:
-            guide_lines.append("用户有明确问题时，先回答问题，再补一句与当前画面贴合的观察。")
+            guide_lines.append("用户有明确问题时，先贴着问题回答。")
         if context_count > 0:
-            guide_lines.append("延续当前对话语气，但不要重复上一条已经说过的观察。")
+            guide_lines.append("参考最近对话保持连贯，不要把上一条换个说法重讲。")
+        return "\n".join(guide_lines)
+
+    def _normalize_user_request_objective(self, user_request_text: str) -> str:
+        import re
+
+        text = self._truncate_preview_text(user_request_text, limit=160)
+        if not text:
+            return ""
+
+        normalized = str(text or "").strip()
+        normalized = re.sub(
+            r"^(?:请|麻烦|拜托|劳驾|帮忙|能不能|可以|可不可以|能否|想请你)?\s*",
+            "",
+            normalized,
+        )
+        normalized = re.sub(
+            (
+                r"^(?:你|你帮我|帮我|麻烦你|麻烦帮我|帮忙|帮忙给我|你帮忙)?\s*"
+                r"(?:看看|看下|看一下|瞅瞅|分析一下|分析下|分析|确认一下|确认下|确认|"
+                r"判断一下|判断下|判断|查一下|查下|查查看|找一下|找找|定位一下|定位下|"
+                r"说一下|说说|讲一下|讲讲|告诉我|帮我看看)?\s*"
+            ),
+            "",
+            normalized,
+        )
+        normalized = re.sub(
+            r"^(?:我想知道|我想确认|我想看|我想问|我在问|我想让你看|你觉得)\s*",
+            "",
+            normalized,
+        )
+        normalized = normalized.strip("，。！？!?、:：;； ")
+        return normalized
+
+    def _extract_request_focus_clauses(
+        self,
+        user_request_text: str,
+        *,
+        limit: int = 4,
+    ) -> list[str]:
+        import re
+
+        objective = self._normalize_user_request_objective(user_request_text)
+        if not objective:
+            return []
+
+        candidates: list[str] = []
+        quote_patterns = (
+            r"「([^」]{2,40})」",
+            r"“([^”]{2,40})”",
+            r"\"([^\"]{2,40})\"",
+            r"'([^']{2,40})'",
+        )
+        for pattern in quote_patterns:
+            for match in re.findall(pattern, objective):
+                value = self._normalize_screen_fact_text(match)
+                if value:
+                    candidates.append(value)
+
+        segments = re.split(r"[，。！？!?；;\n]", objective)
+        clause_cleanup_pattern = re.compile(
+            (
+                r"^(?:这个|那个|这|那|目前|现在|刚刚|刚才|电脑上|屏幕上|当前|这里|那里)?\s*"
+                r"(?:的)?\s*"
+            )
+        )
+        suffix_cleanup_pattern = re.compile(
+            r"(?:在哪|在哪里|在哪儿|是啥|是什么|什么意思|怎么回事|怎么样|如何|怎么办|怎么做|有没有|是否|是不是|出来没|看到了吗|能看到吗)$"
+        )
+        for segment in segments:
+            cleaned = self._normalize_screen_fact_text(segment)
+            if not cleaned:
+                continue
+            cleaned = clause_cleanup_pattern.sub("", cleaned).strip()
+            cleaned = suffix_cleanup_pattern.sub("", cleaned).strip("，。！？!?、:：;； ")
+            if cleaned and len(cleaned) >= 2:
+                candidates.append(cleaned)
+
+        fallback = self._normalize_screen_fact_text(objective)
+        if fallback:
+            candidates.append(fallback)
+
+        normalized_candidates: list[str] = []
+        seen: set[str] = set()
+        stop_values = {
+            "看看",
+            "看下",
+            "看一下",
+            "分析",
+            "确认",
+            "判断",
+            "查一下",
+            "查下",
+            "找一下",
+            "找找",
+            "说一下",
+            "说说",
+            "讲一下",
+            "讲讲",
+        }
+        for candidate in candidates:
+            cleaned = self._normalize_screen_fact_text(candidate)
+            if not cleaned or cleaned in stop_values:
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_candidates.append(cleaned)
+
+        normalized_candidates.sort(key=len, reverse=True)
+        return normalized_candidates[: max(1, int(limit or 1))]
+
+    def _classify_user_request_intent(self, user_request_text: str) -> str:
+        text = self._normalize_user_request_objective(user_request_text).casefold()
+        if not text:
+            return "observe"
+
+        if any(marker in text for marker in ("在哪", "在哪里", "在哪儿", "哪个", "哪一个", "位置", "地方")):
+            return "locate"
+        if any(marker in text for marker in ("怎么做", "怎么办", "下一步", "咋弄", "卡在哪", "卡住了")):
+            return "guidance"
+        if any(marker in text for marker in ("什么意思", "怎么回事", "为什么", "为啥", "是啥", "是什么")):
+            return "explain"
+        if any(marker in text for marker in ("有没有", "是否", "是不是", "出来没", "看到没", "看到了吗", "能看到吗", "确认")):
+            return "verify"
+        return "observe"
+
+    def _evaluate_user_request_intent(
+        self,
+        *,
+        user_request_text: str,
+        fact_digest: dict[str, Any] | None,
+        recognition_text: str,
+        contexts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        normalized_request = self._truncate_preview_text(user_request_text, limit=160)
+        objective = self._normalize_user_request_objective(normalized_request)
+        intent_type = self._classify_user_request_intent(normalized_request)
+        focus_clauses = self._extract_request_focus_clauses(normalized_request)
+
+        visible_parts: list[str] = []
+        for item in list((fact_digest or {}).get("summary_lines", []) or []):
+            text = str(item or "").strip()
+            if text:
+                visible_parts.append(text)
+        recognition_preview = self._truncate_preview_text(recognition_text, limit=240)
+        if recognition_preview:
+            visible_parts.append(recognition_preview)
+        visible_text = "\n".join(visible_parts).casefold()
+
+        matched_clauses = [
+            clause
+            for clause in focus_clauses
+            if len(str(clause or "").strip()) >= 2
+            and str(clause or "").casefold() in visible_text
+        ]
+
+        objective_lower = objective.casefold()
+        has_reference_pronoun = any(
+            marker in objective_lower
+            for marker in ("这个", "那个", "这", "那", "这里", "那里", "它", "其")
+        )
+        screen_looks_transitional = any(
+            marker in visible_text
+            for marker in (
+                "启动",
+                "连接",
+                "加载",
+                "登陆",
+                "登录",
+                "欢迎",
+                "主页",
+                "首页",
+                "请稍候",
+                "等待",
+                "loading",
+                "launch",
+                "connect",
+                "starting",
+            )
+        )
+
+        action = "answer"
+        reason = "当前画面大概率足以支撑直接回答。"
+        if not normalized_request:
+            action = "answer"
+            reason = "没有额外用户目标，按常规识屏回答。"
+        elif focus_clauses and not matched_clauses:
+            if intent_type in {"locate", "verify"} or has_reference_pronoun:
+                action = "clarify_or_switch"
+                reason = "用户要确认的目标没有出现在当前画面里。"
+            elif screen_looks_transitional:
+                action = "clarify_or_switch"
+                reason = "当前画面更像过渡状态，和用户要找的目标可能不是同一页。"
+            else:
+                action = "answer_with_uncertainty"
+                reason = "目标没有明显出现在屏幕里，回答时需要先承认不确定。"
+        elif not focus_clauses and intent_type in {"locate", "verify"} and screen_looks_transitional:
+            action = "clarify_or_switch"
+            reason = "用户在找具体位置/结果，但当前画面仍是过渡状态。"
+
+        recent_user_reference = ""
+        for item in reversed(list(contexts or [])):
+            text = str(item or "").strip()
+            if not text.startswith("用户:"):
+                continue
+            content = text.split(":", 1)[-1].strip()
+            if not content or content == normalized_request:
+                continue
+            recent_user_reference = self._truncate_preview_text(content, limit=100)
+            break
+
+        return {
+            "request_text": normalized_request,
+            "objective": objective or normalized_request,
+            "intent_type": intent_type,
+            "focus_clauses": focus_clauses,
+            "matched_clauses": matched_clauses,
+            "action": action,
+            "reason": reason,
+            "recent_user_reference": recent_user_reference,
+        }
+
+    def _build_intent_first_screen_reply_guide(
+        self,
+        *,
+        request_intent: dict[str, Any] | None,
+        context_count: int,
+    ) -> str:
+        intent = dict(request_intent or {})
+        request_text = str(intent.get("request_text", "") or "").strip()
+        if not request_text:
+            return ""
+
+        objective = str(intent.get("objective", "") or request_text).strip()
+        action = str(intent.get("action", "answer") or "answer").strip()
+        reason = str(intent.get("reason", "") or "").strip()
+        focus_clauses = [
+            str(item or "").strip()
+            for item in list(intent.get("focus_clauses", []) or [])
+            if str(item or "").strip()
+        ]
+        matched_clauses = [
+            str(item or "").strip()
+            for item in list(intent.get("matched_clauses", []) or [])
+            if str(item or "").strip()
+        ]
+        recent_user_reference = str(intent.get("recent_user_reference", "") or "").strip()
+
+        guide_lines = [
+            f"当前这条用户消息：{request_text}",
+            f"提炼出的用户目标：{objective}",
+            "决策顺序：先判断用户现在想确认什么，再判断当前画面能不能直接回答。",
+        ]
+        if focus_clauses:
+            guide_lines.append("目标线索：" + "、".join(focus_clauses[:3]))
+        if matched_clauses:
+            guide_lines.append("当前画面已覆盖的线索：" + "、".join(matched_clauses[:3]))
+        if reason:
+            guide_lines.append(f"覆盖判断：{reason}")
+        if recent_user_reference:
+            guide_lines.append(f"最近用户上文：{recent_user_reference}")
+        if action == "clarify_or_switch":
+            guide_lines.append(
+                "回复动作：这次先不要抢着解读当前界面，更不要把启动页、连接页、首页或过渡画面当成最终答案。"
+            )
+            guide_lines.append(
+                "优先直接说明你还没在当前屏幕里看到用户要找的目标，然后追问它在哪个窗口/页面，或请用户切到那里。"
+            )
+        elif action == "answer_with_uncertainty":
+            guide_lines.append(
+                "回复动作：可以结合当前画面回答，但必须先交代你还不能完全确认，不要把猜测说成已经看到。"
+            )
+        else:
+            guide_lines.append(
+                "回复动作：当前画面足以支撑回答时，再根据屏幕给结论，不要多做无关播报。"
+            )
+        if context_count > 0:
+            guide_lines.append("结合最近对话处理“这个”“那个”“刚刚那个”之类的省略指代。")
         return "\n".join(guide_lines)
 
     def _soften_screen_reply_phrasing(self, text: str) -> str:
@@ -2732,7 +2975,7 @@ class ScreenCompanionMediaMixin:
 
         return temp_file.name
 
-    async def _capture_screen_bytes(self):
+    async def _capture_screen_bytes(self, *, force_fresh_capture: bool = False):
         """返回截图字节流与来源标签。"""
 
         def _core_task():
@@ -2741,6 +2984,7 @@ class ScreenCompanionMediaMixin:
 
             shared_dir_enabled = self._get_runtime_flag("use_shared_screenshot_dir")
             configured_shared_dir = str(getattr(self, "shared_screenshot_dir", "") or "").strip()
+            force_live_capture = bool(force_fresh_capture)
 
             def resolve_shared_screenshot_dir() -> str:
                 if configured_shared_dir:
@@ -2833,6 +3077,13 @@ class ScreenCompanionMediaMixin:
                 except Exception as e:
                     logger.error(f"实时截图失败: {e}")
                     raise
+
+            if force_live_capture:
+                try:
+                    logger.info("当前识屏请求要求优先抓取最新截图，开始立即实时截图")
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.warning(f"立即实时截图失败，将回退到共享截图目录: {e}")
 
             screenshots_dir = resolve_shared_screenshot_dir()
 
@@ -2964,8 +3215,14 @@ class ScreenCompanionMediaMixin:
             "source_label": active_window_title or "最近一段桌面录屏",
         }
 
-    async def _capture_screenshot_context(self) -> dict[str, Any]:
-        image_bytes, active_window_title = await self._capture_screen_bytes()
+    async def _capture_screenshot_context(
+        self,
+        *,
+        force_fresh_capture: bool = False,
+    ) -> dict[str, Any]:
+        image_bytes, active_window_title = await self._capture_screen_bytes(
+            force_fresh_capture=force_fresh_capture
+        )
         return {
             "media_kind": "image",
             "mime_type": "image/jpeg",
@@ -2978,12 +3235,15 @@ class ScreenCompanionMediaMixin:
         self,
         *,
         fallback_window_title: str = "",
+        force_fresh_capture: bool = False,
     ) -> tuple[bytes, str, str]:
         latest_image_bytes = b""
         latest_window_title = ""
         active_window_title = self._normalize_window_title(fallback_window_title)
         try:
-            latest_image_bytes, latest_window_title = await self._capture_screen_bytes()
+            latest_image_bytes, latest_window_title = await self._capture_screen_bytes(
+                force_fresh_capture=force_fresh_capture
+            )
             active_window_title = (
                 self._normalize_window_title(latest_window_title)
                 or active_window_title
@@ -3022,7 +3282,8 @@ class ScreenCompanionMediaMixin:
 
             latest_image_bytes, latest_window_title, active_window_title = (
                 await self._capture_latest_screen_anchor(
-                    fallback_window_title=clip_active_window_title
+                    fallback_window_title=clip_active_window_title,
+                    force_fresh_capture=True,
                 )
             )
 
@@ -3045,11 +3306,22 @@ class ScreenCompanionMediaMixin:
             except OSError:
                 pass
 
-    async def _capture_recognition_context(self) -> dict[str, Any]:
+    async def _capture_recognition_context(
+        self,
+        *,
+        force_fresh_capture: bool = False,
+        force_fresh_recording: bool = False,
+    ) -> dict[str, Any]:
         if self._use_screen_recording_mode():
+            if force_fresh_recording:
+                return await self._capture_one_shot_recording_context(
+                    self._get_recording_duration_seconds()
+                )
             return await self._capture_recording_context()
 
-        return await self._capture_screenshot_context()
+        return await self._capture_screenshot_context(
+            force_fresh_capture=force_fresh_capture
+        )
 
     async def _capture_proactive_recognition_context(self) -> dict[str, Any]:
         if self._use_screen_recording_mode():
@@ -3811,6 +4083,7 @@ class ScreenCompanionMediaMixin:
                 active_window_title=active_window_title,
                 custom_prompt=custom_prompt,
                 task_id=task_id,
+                user_request_text=history_user_text,
             ),
             timeout=effective_analysis_timeout,
         )
@@ -4289,7 +4562,7 @@ class ScreenCompanionMediaMixin:
                 if curr_cid:
                     conversation = await conv_mgr.get_conversation(uid, curr_cid)
                     if conversation and conversation.history:
-                        for msg in conversation.history[-5:]:
+                        for msg in conversation.history[-8:]:
                             if msg.get("role") in {"user", "assistant"}:
                                 content = str(msg.get("content", "") or "").strip()
                                 if content:
@@ -4395,6 +4668,7 @@ class ScreenCompanionMediaMixin:
         active_window_title: str = "",
         custom_prompt: str = "",
         task_id: str = "unknown",
+        user_request_text: str = "",
     ) -> list[BaseMessageComponent]:
         """Analyze the current screenshot or recording context and generate a reply."""
         should_send_rest_reminder, rest_reminder_info = self._should_send_rest_reminder()
@@ -4621,8 +4895,30 @@ class ScreenCompanionMediaMixin:
             analysis_trace["activity_description"] = str(
                 fact_digest.get("activity_description", "") or ""
             )
+            analysis_trace["user_request"] = self._truncate_preview_text(
+                user_request_text,
+                limit=120,
+            )
+            request_intent = self._evaluate_user_request_intent(
+                user_request_text=user_request_text,
+                fact_digest=fact_digest,
+                recognition_text=recognition_text,
+                contexts=contexts,
+            )
+            analysis_trace["request_intent_type"] = str(
+                request_intent.get("intent_type", "") or ""
+            )
+            analysis_trace["request_intent_action"] = str(
+                request_intent.get("action", "") or ""
+            )
 
             prompt_parts: list[str] = []
+            intent_first_guide = self._build_intent_first_screen_reply_guide(
+                request_intent=request_intent,
+                context_count=len(contexts),
+            )
+            if intent_first_guide:
+                prompt_parts.append(intent_first_guide)
             if fact_digest.get("prompt_block"):
                 prompt_parts.append(str(fact_digest.get("prompt_block", "")))
             if effective_use_external_vision:
@@ -4651,89 +4947,16 @@ class ScreenCompanionMediaMixin:
                     "连续性要求：把这条消息视作同一段持续陪伴的延续，优先补充新的变化、判断或下一步；"
                     "不要每条都重新用情绪化称呼开场，也不要重复上一条已经说过的提醒。"
                 )
-            prompt_parts.append(f"回复节奏：{reply_interval_guidance}")
-            prompt_parts.append(f"当前陪伴模式：{presence_mode.get('label', '平衡陪伴')}。{presence_mode.get('prompt_guidance', '')}")
-
-            related_memories = self._trigger_related_memories(scene, active_window_title)
-            analysis_trace["memory_hints"] = related_memories[:4]
-            if related_memories:
-                memory_lines = "\n".join(f"- {memory}" for memory in related_memories[:3])
-                prompt_parts.append("可参考的相关记忆：\n" + memory_lines)
-
-            preference_guidance = self._collect_scene_preference_guidance(
-                scene,
-                active_window_title=active_window_title,
-                limit=4,
-            )
-            analysis_trace["preference_hints"] = preference_guidance[:4]
-            if preference_guidance:
-                prompt_parts.append(
-                    "用户偏好与学习结果：\n"
-                    + "\n".join(f"- {hint}" for hint in preference_guidance)
-                )
-
-            shared_activities = self._get_relevant_shared_activities(scene, limit=3)
-            if shared_activities:
-                activity_lines = []
-                for activity_name, activity_data in shared_activities:
-                    category = self._shared_activity_category_label(
-                        activity_data.get("category", "other")
-                    )
-                    last_shared = activity_data.get("last_shared", "未知")
-                    activity_lines.append(f"- {category}: {activity_name}（最近共同提到：{last_shared}）")
-                prompt_parts.append("可引用的共同经历：\n" + "\n".join(activity_lines))
-
-            if self.observations:
-                observation_lines = []
-                for obs in self.observations[-3:][::-1]:
-                    timestamp = str(obs.get("timestamp", "")).split("T")[-1][:5]
-                    observation_lines.append(
-                        f"- {timestamp} {obs.get('scene', '未知')}: {obs.get('description', '')}"
-                    )
-                if observation_lines:
-                    prompt_parts.append("最近观察记录：\n" + "\n".join(observation_lines))
-
-            wrap_up_signal = self._detect_task_wrap_up_signal(
-                scene=scene,
-                recognition_text=recognition_text,
-                contexts=contexts,
-                active_window_title=active_window_title,
-            )
-            analysis_trace["wrap_up_detected"] = bool(wrap_up_signal.get("detected"))
-            if wrap_up_signal.get("detected"):
-                prompt_parts.append(
-                    "任务收尾感："
-                    + str(wrap_up_signal.get("guidance", "") or "")
-                )
-                if presence_mode.get("wrap_up_style"):
-                    prompt_parts.append(
-                        f"收尾语气：{presence_mode.get('wrap_up_style')}"
-                    )
+            analysis_trace["memory_hints"] = []
+            analysis_trace["preference_hints"] = []
+            analysis_trace["wrap_up_detected"] = False
 
             if custom_prompt:
                 prompt_parts.append(f"额外要求：{custom_prompt}")
             else:
-                if scene_prompt and not preference_guidance:
-                    prompt_parts.append(f"场景偏好：{scene_prompt}")
-                if time_prompt:
-                    prompt_parts.append(f"时间提示：{time_prompt}")
-                if holiday_prompt:
-                    prompt_parts.append(f"节日提示：{holiday_prompt}")
-                if weather_prompt:
-                    prompt_parts.append(f"天气提示：{weather_prompt}")
-                if system_status_prompt:
-                    prompt_parts.append(f"系统状态：{system_status_prompt}")
                 if not effective_use_external_vision and analysis_trace["trigger_reason"]:
                     trigger_reason = analysis_trace["trigger_reason"]
                     prompt_parts.append(f"触发背景：{trigger_reason}")
-                    if "窗口变化" in trigger_reason or "提升" in trigger_reason:
-                        prompt_parts.append("场景重点：用户刚切换到新应用或新内容，请先确认当前窗口的实际内容再给出建议。")
-                    elif "停留较久" in trigger_reason or "低频" in trigger_reason:
-                        prompt_parts.append("场景重点：用户可能正处于深度专注状态，建议以轻柔陪伴为主，避免打断。")
-                    elif "变化不大" in trigger_reason or "降低" in trigger_reason:
-                        prompt_parts.append("场景重点：当前画面相对稳定，建议只提供最有价值的1条简短提醒即可。")
-
-            prompt_parts.append(f"语气控制：{sampling_profile['tone_instruction']}")
 
             if not should_send_rest_reminder:
                 prompt_parts.append(
@@ -4765,18 +4988,6 @@ class ScreenCompanionMediaMixin:
                     context_count=len(contexts),
                 )
             )
-
-            if self._should_offer_shared_activity_invite(scene, custom_prompt):
-                prompt_parts.append(
-                    "如果语气自然，可以轻轻表达你也想和用户一起做点轻松的事，但必须低频、顺势，不能打断正事。"
-                )
-
-            if sampling_profile["category"] == "entertainment":
-                prompt_parts.append("更偏轻声陪伴和顺势提醒，不要过度推动任务。")
-            elif sampling_profile["category"] == "work":
-                prompt_parts.append("建议尽量收束成 1 到 2 个具体判断或下一步。")
-            else:
-                prompt_parts.append("回复尽量简短、具体、贴近当前任务。")
 
             latest_window_title = self._normalize_window_title(
                 capture_context.get("latest_window_title", "")
