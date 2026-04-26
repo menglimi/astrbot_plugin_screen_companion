@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "2.9.9"
+    APP_VERSION = "3.0.0"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -2776,10 +2776,33 @@ class WebServer:
             with schema_path.open("r", encoding="utf-8") as f:
                 schema = json.load(f)
             if isinstance(schema, dict):
-                return schema
+                return {
+                    key: self._normalize_setting_meta(key, value)
+                    for key, value in schema.items()
+                }
         except Exception as e:
             logger.error(f"读取配置 schema 失败: {e}")
         return {}
+
+    @staticmethod
+    def _is_optional_setting_meta(field_meta: dict[str, Any]) -> bool:
+        field_type = str(field_meta.get("type") or "").lower()
+        if field_type not in {"string", "text", "password"}:
+            return False
+        default = field_meta.get("default")
+        return default in {"", None}
+
+    def _normalize_setting_meta(self, field_key: str, field_meta: Any) -> Any:
+        if not isinstance(field_meta, dict):
+            return field_meta
+
+        next_meta = dict(field_meta)
+        if self._is_optional_setting_meta(next_meta):
+            next_meta["optional"] = True
+            hint = str(next_meta.get("hint") or "").strip()
+            if "选填" not in hint and "可留空" not in hint and "留空" not in hint:
+                next_meta["hint"] = f"{hint} 选填，可留空。".strip()
+        return next_meta
 
     def _build_settings_payload(self) -> dict[str, Any]:
         schema = self._load_settings_schema()
@@ -2829,7 +2852,7 @@ class WebServer:
             {
                 "id": "persona",
                 "title": "人格与对话",
-                "description": "先决定 Bot 是谁、怎么说话，以及用户主动求助时它该不该介入识屏。",
+                "description": "设置人设、语气和对话方式。",
                 "fields": [
                     "bot_name",
                     "system_prompt",
@@ -2846,7 +2869,7 @@ class WebServer:
             {
                 "id": "runtime",
                 "title": "运行节奏",
-                "description": "决定多久看一次、怎么触发、用截图还是录屏，以及是否按窗口自动开陪伴。",
+                "description": "设置触发频率、互动风格和窗口陪伴。",
                 "fields": [
                     "enabled",
                     "interaction_mode",
@@ -2857,7 +2880,7 @@ class WebServer:
                     "rest_time_range",
                     "custom_presets",
                     "current_preset_index",
-                    "use_companion_mode",
+                    "interaction_style_mode",
                     "capture_active_window",
                     "enable_window_companion",
                     "window_companion_targets",
@@ -2868,7 +2891,7 @@ class WebServer:
             {
                 "id": "vision",
                 "title": "识屏与视觉",
-                "description": "配置识屏素材从哪里来、先走哪条视觉链路，以及模型该重点看什么。",
+                "description": "设置截图/录屏方式和视觉识别链路。",
                 "fields": [
                     "screen_recognition_mode",
                     "ffmpeg_path",
@@ -2882,15 +2905,14 @@ class WebServer:
                     "image_prompt",
                     "use_external_vision",
                     "allow_unsafe_video_direct_fallback",
-                    "vision_api_url",
-                    "vision_api_key",
-                    "vision_api_model",
+                    "vision_provider_id",
+                    "vision_provider_id_backup",
                 ],
             },
             {
                 "id": "diary",
                 "title": "日记与记忆",
-                "description": "管理日记生成、自动撤回、长期学习和陪伴式记忆的保留方式。",
+                "description": "设置日记生成、撤回和学习记录。",
                 "fields": [
                     "enable_diary",
                     "diary_time",
@@ -2906,7 +2928,7 @@ class WebServer:
             {
                 "id": "sensing",
                 "title": "环境感知",
-                "description": "放麦克风、天气、电量内存提醒、主动消息目标和定时提示这类环境感知能力。",
+                "description": "设置麦克风、天气和主动提醒。",
                 "fields": [
                     "enable_mic_monitor",
                     "mic_threshold",
@@ -2924,7 +2946,7 @@ class WebServer:
             {
                 "id": "analytics",
                 "title": "本地统计",
-                "description": "管理键鼠输入统计、活动轨迹、离开自动挂起和活动页隐私保护。",
+                "description": "设置输入统计、活动轨迹和离开挂起。",
                 "fields": [
                     "enable_background_activity_tracking",
                     "background_activity_tracking_interval",
@@ -2940,7 +2962,7 @@ class WebServer:
             {
                 "id": "webui",
                 "title": "WebUI",
-                "description": "配置 WebUI 的访问地址、登录保护、会话时长，以及是否对外开放分析接口。",
+                "description": "设置网页管理界面的访问和安全选项。",
                 "fields": [
                     "webui.enabled",
                     "webui.host",
@@ -2957,19 +2979,19 @@ class WebServer:
             "webui.enabled": {
                 "description": "启用 WebUI",
                 "type": "bool",
-                "hint": "总开关。关闭后不会启动网页管理界面，也无法通过浏览器查看日记、活动和配置页。",
+                "hint": "网页管理界面总开关。关闭后无法通过浏览器访问。",
                 "default": False,
             },
             "webui.host": {
                 "description": "WebUI 监听地址",
                 "type": "string",
-                "hint": "只在本机访问时建议填 127.0.0.1；需要让局域网内其他设备访问时再填 0.0.0.0。",
+                "hint": "只在本机使用建议填 127.0.0.1；要让局域网设备访问再填 0.0.0.0。",
                 "default": "0.0.0.0",
             },
             "webui.port": {
                 "description": "WebUI 端口",
                 "type": "int",
-                "hint": "默认 6314。修改后访问地址会变成新端口；如果端口被占用，WebUI 可能会自动回退到别的可用端口。",
+                "hint": "默认 6314。改了之后要用新端口访问。",
                 "default": 6314,
                 "min": 1024,
                 "max": 65535,
@@ -2977,19 +2999,19 @@ class WebServer:
             "webui.auth_enabled": {
                 "description": "启用访问密码",
                 "type": "bool",
-                "hint": "建议保持开启。关闭后，只要能访问到这个地址的人都可以直接打开 WebUI。",
+                "hint": "建议开启。关闭后，能访问这个地址的人都能直接打开 WebUI。",
                 "default": True,
             },
             "webui.password": {
                 "description": "WebUI 密码",
                 "type": "password",
-                "hint": "留空时会在首次启动时自动生成随机密码；手动填写后，浏览器登录和外部 API 鉴权都会使用这个值。",
+                "hint": "不填会自动生成随机密码；手动填写后，浏览器登录和外部 API 都用这个值。",
                 "default": "",
             },
             "webui.session_timeout": {
                 "description": "会话过期时间",
                 "type": "int",
-                "hint": "单位为秒。时间越短越安全，但你会更频繁地重新登录；默认 3600 秒通常够用。",
+                "hint": "单位秒。时间越短越安全，但要更频繁重新登录。",
                 "default": 3600,
                 "min": 300,
                 "max": 604800,
@@ -2997,12 +3019,17 @@ class WebServer:
             "webui.allow_external_api": {
                 "description": "允许外部 API 调用",
                 "type": "bool",
-                "hint": "开启后，外部服务可通过 `/api/analyze` 等接口调用识图分析。除非你明确要接别的服务，否则建议保持关闭。",
+                "hint": "开启后，外部服务可调用识图接口。没有明确需求建议关闭。",
                 "default": False,
             },
         }
 
-        schema.update(webui_schema)
+        schema.update(
+            {
+                key: self._normalize_setting_meta(key, value)
+                for key, value in webui_schema.items()
+            }
+        )
         if "webui.password" in schema:
             schema["webui.password"] = {
                 **schema["webui.password"],
@@ -3011,108 +3038,111 @@ class WebServer:
             }
         schema.update(
             {
-                "enable_window_companion": {
-                    "description": "开启窗口自动陪伴",
-                    "type": "bool",
-                    "hint": "命中的窗口一出现就自动开始陪伴，窗口消失后再自动结束。适合常驻游戏、IDE、视频播放器这类固定场景。",
-                    "default": False,
-                },
-                "window_companion_targets": {
-                    "description": "窗口陪伴目标",
-                    "type": "text",
-                    "hint": "每行一个窗口关键字；也支持“关键字|补充提示词”。例如：`Cursor|重点关注报错和下一步`，适合给不同窗口加不同陪伴重点。",
-                    "default": "",
-                },
-                "window_companion_check_interval": {
-                    "description": "窗口检查间隔",
-                    "type": "int",
-                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。这里只影响窗口命中速度；窗口陪伴真正发消息时，仍继承当前生效的触发间隔和触发概率。",
-                    "default": 5,
-                    "min": 2,
-                    "max": 300,
-                },
-                "window_companion_reattach_grace_seconds": {
-                    "description": "窗口重连宽限期",
-                    "type": "int",
-                    "hint": "目标窗口短暂关闭后，最多等待多久再判定为真正结束。适合游戏结算、重开、重新匹配这类会短暂销毁窗口的场景。",
-                    "default": 300,
-                    "min": 10,
-                    "max": 3600,
-                },
-                "enable_input_stats": {
-                    "description": "启用本地输入统计",
-                    "type": "bool",
-                    "hint": "开启后会监听全局键盘和鼠标输入，用来补充工作轨迹、活跃度和离开判断。系统层面可能仍需授予输入监听权限。",
-                    "default": False,
-                },
-                "enable_background_activity_tracking": {
-                    "description": "启用独立活动轨迹采集",
-                    "type": "bool",
-                    "hint": "开启后，即使没有启动自动观察，也会按固定间隔记录当前活动窗口，并尽量拆出应用 / 网站 / 页面轨迹。自动观察运行中会继续优先使用识屏轨迹。",
-                    "default": False,
-                },
-                "background_activity_tracking_interval": {
-                    "description": "独立轨迹采样间隔",
-                    "type": "int",
-                    "hint": "后台每隔多少秒采样一次当前活动窗口。值越小越细，值越大越省资源。",
-                    "default": 15,
-                    "min": 5,
-                    "max": 3600,
-                    "condition": {
-                        "enable_background_activity_tracking": True,
+                key: self._normalize_setting_meta(key, value)
+                for key, value in {
+                    "enable_window_companion": {
+                        "description": "开启窗口自动陪伴",
+                        "type": "bool",
+                        "hint": "命中目标窗口后自动开始陪伴，窗口消失后自动结束。",
+                        "default": False,
                     },
-                },
-                "input_stats_flush_interval": {
-                    "description": "输入统计落盘间隔",
-                    "type": "int",
-                    "hint": "每隔多少秒把输入统计写入本地 JSON。值越小越实时，值越大越省磁盘 IO。",
-                    "default": 60,
-                    "min": 10,
-                    "max": 3600,
-                },
-                "enable_away_auto_pause": {
-                    "description": "离开电脑时自动挂起观察",
-                    "type": "bool",
-                    "hint": "仅在启用本地输入统计后生效。长时间没有键鼠输入时，自动观察会先安静下来；检测到你回来后再恢复。",
-                    "default": False,
-                    "condition": {"enable_input_stats": True},
-                },
-                "away_auto_pause_threshold": {
-                    "description": "自动挂起阈值",
-                    "type": "int",
-                    "hint": "连续多久没有输入后，认为你暂时离开电脑，并挂起自动观察。",
-                    "default": 1200,
-                    "min": 300,
-                    "max": 14400,
-                    "condition": {
-                        "enable_input_stats": True,
-                        "enable_away_auto_pause": True,
+                    "window_companion_targets": {
+                        "description": "窗口陪伴目标",
+                        "type": "text",
+                        "hint": "每行一个窗口关键字。也支持“关键字|补充提示词”，例如 `Cursor|重点关注报错和下一步`。",
+                        "default": "",
                     },
-                },
-                "away_long_notice_threshold": {
-                    "description": "长时间离开提醒阈值",
-                    "type": "int",
-                    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒，然后继续安静等待，不会持续刷消息。",
-                    "default": 3600,
-                    "min": 600,
-                    "max": 86400,
-                    "condition": {
-                        "enable_input_stats": True,
-                        "enable_away_auto_pause": True,
+                    "window_companion_check_interval": {
+                        "description": "窗口检查间隔",
+                        "type": "int",
+                        "hint": "每隔多少秒检查一次目标窗口。只影响命中速度，不影响发消息频率。",
+                        "default": 5,
+                        "min": 2,
+                        "max": 300,
                     },
-                },
-                "mask_activity_window_titles": {
-                    "description": "活动页窗口标题脱敏",
-                    "type": "bool",
-                    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，整体更偏向隐私保护的活动回顾体验。",
-                    "default": False,
-                },
-                "activity_recognition_rules": {
-                    "description": "活动识别自定义规则",
-                    "type": "text",
-                    "hint": "每行一条，格式为 app|关键词|显示名 或 site|关键词/域名|显示名。支持 # 注释，例如：app|cursor.exe|Cursor 或 site|docs.company.com|公司文档。",
-                    "default": "",
-                },
+                    "window_companion_reattach_grace_seconds": {
+                        "description": "窗口重连宽限期",
+                        "type": "int",
+                        "hint": "目标窗口短暂消失后，最多等多久再判定为真正结束。",
+                        "default": 300,
+                        "min": 10,
+                        "max": 3600,
+                    },
+                    "enable_input_stats": {
+                        "description": "启用本地输入统计",
+                        "type": "bool",
+                        "hint": "开启后统计键盘和鼠标输入，用来判断活跃度和离开状态。",
+                        "default": False,
+                    },
+                    "enable_background_activity_tracking": {
+                        "description": "启用独立活动轨迹采集",
+                        "type": "bool",
+                        "hint": "开启后会定时记录当前活动窗口，即使自动观察没开也会记录。",
+                        "default": False,
+                    },
+                    "background_activity_tracking_interval": {
+                        "description": "独立轨迹采样间隔",
+                        "type": "int",
+                        "hint": "每隔多少秒记录一次当前活动窗口。",
+                        "default": 15,
+                        "min": 5,
+                        "max": 3600,
+                        "condition": {
+                            "enable_background_activity_tracking": True,
+                        },
+                    },
+                    "input_stats_flush_interval": {
+                        "description": "输入统计落盘间隔",
+                        "type": "int",
+                        "hint": "每隔多少秒把输入统计写入本地文件。",
+                        "default": 60,
+                        "min": 10,
+                        "max": 3600,
+                    },
+                    "enable_away_auto_pause": {
+                        "description": "离开电脑时自动挂起观察",
+                        "type": "bool",
+                        "hint": "长时间没有键鼠输入时，自动观察会暂停；回来后自动恢复。",
+                        "default": False,
+                        "condition": {"enable_input_stats": True},
+                    },
+                    "away_auto_pause_threshold": {
+                        "description": "自动挂起阈值",
+                        "type": "int",
+                        "hint": "连续多久没有输入后，判定为离开电脑。",
+                        "default": 1200,
+                        "min": 300,
+                        "max": 14400,
+                        "condition": {
+                            "enable_input_stats": True,
+                            "enable_away_auto_pause": True,
+                        },
+                    },
+                    "away_long_notice_threshold": {
+                        "description": "长时间离开提醒阈值",
+                        "type": "int",
+                        "hint": "离开多久后发一次轻提醒。",
+                        "default": 3600,
+                        "min": 600,
+                        "max": 86400,
+                        "condition": {
+                            "enable_input_stats": True,
+                            "enable_away_auto_pause": True,
+                        },
+                    },
+                    "mask_activity_window_titles": {
+                        "description": "活动页窗口标题脱敏",
+                        "type": "bool",
+                        "hint": "开启后，活动页里的窗口标题会统一脱敏。",
+                        "default": False,
+                    },
+                    "activity_recognition_rules": {
+                        "description": "活动识别自定义规则",
+                        "type": "text",
+                        "hint": "每行一条。格式：`app|关键词|显示名` 或 `site|域名/关键词|显示名`，支持 `#` 注释。",
+                        "default": "",
+                    },
+                }.items()
             }
         )
 
@@ -3155,9 +3185,8 @@ class WebServer:
             "bot_vision_quality",
             "image_quality",
             "allow_unsafe_video_direct_fallback",
-            "vision_api_url",
-            "vision_api_key",
-            "vision_api_model",
+            "vision_provider_id",
+            "vision_provider_id_backup",
             "diary_reference_days",
             "diary_auto_recall",
             "diary_recall_time",
@@ -3200,9 +3229,8 @@ class WebServer:
             "recording_duration_seconds": {"screen_recognition_mode": True},
             "shared_screenshot_dir": {"use_shared_screenshot_dir": True},
             "allow_unsafe_video_direct_fallback": {"use_external_vision": True},
-            "vision_api_url": {"use_external_vision": True},
-            "vision_api_key": {"use_external_vision": True},
-            "vision_api_model": {"use_external_vision": True},
+            "vision_provider_id": {"use_external_vision": True},
+            "vision_provider_id_backup": {"use_external_vision": True},
             "diary_time": {"enable_diary": True},
             "diary_reference_days": {"enable_diary": True},
             "diary_auto_recall": {"enable_diary": True},
@@ -4231,10 +4259,17 @@ class WebServer:
     async def _analyze_image_logic(self, image_bytes: bytes, custom_prompt: str = None) -> dict:
         """Analyze an uploaded image and build a companion reply."""
         try:
-            if not self.plugin.vision_api_url:
+            if not any(
+                (
+                    str(getattr(self.plugin, "vision_provider_id", "") or "").strip(),
+                    str(getattr(self.plugin, "vision_provider_id_backup", "") or "").strip(),
+                    str(getattr(self.plugin, "vision_api_url", "") or "").strip(),
+                    str(getattr(self.plugin, "vision_api_url_backup", "") or "").strip(),
+                )
+            ):
                 return {
                     "success": False,
-                    "error": "Vision API is not configured",
+                    "error": "Vision provider is not configured",
                     "reply": "I do not have vision configured yet.",
                 }
 

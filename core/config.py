@@ -18,6 +18,11 @@ class InteractionMode(str, Enum):
     AUTO = "自动"
     MANUAL = "手动"
 
+class InteractionStyleMode(str, Enum):
+    NORMAL = "普通"
+    COMPANION = "陪伴"
+    STEALTH = "偷看"
+
 # 已移除 CaptureMode 和 StartEndMode 枚举类型，改为布尔值开关
 
 class WebuiConfig(BaseModel):
@@ -35,15 +40,16 @@ class PluginConfig(BaseModel):
     bot_name: str = "屏幕助手"
     enabled: bool = False
     interaction_mode: InteractionMode = InteractionMode.CUSTOM
+    interaction_style_mode: InteractionStyleMode = InteractionStyleMode.NORMAL
     check_interval: int = 300
     trigger_probability: int = 30
     active_time_range: str = ""
     # === 自定义预设配置 ===
     custom_presets: str = ""  # 格式: 预设1名称|间隔|概率,预设2名称|间隔|概率
     current_preset_index: int = 0  # 当前使用的预设索引
-    use_companion_mode: bool = False  # 是否额外追加陪伴式互动约束，不影响自动观察开关
+    use_companion_mode: bool = False  # 兼容旧配置；运行时请优先使用 interaction_style_mode
     companion_prompt: str = ""  # 陪伴模式专用人格，留空则沿用当前 AstrBot 人格或 system_prompt
-    stealth_watch_mode: bool = False  # 偷看模式，弱化直白监控腔，强调低打扰观察感
+    stealth_watch_mode: bool = False  # 兼容旧配置；运行时请优先使用 interaction_style_mode
     enable_usage_context_autopilot: bool = False  # 允许 bot 自行决定是否参考电脑使用情况
     enable_local_browser_history: bool = False  # 允许读取本地浏览器历史作为旁证
     usage_context_lookback_hours: int = 6  # 活动轨迹回看窗口
@@ -58,6 +64,8 @@ class PluginConfig(BaseModel):
     recording_duration_seconds: int = 10
     use_external_vision: bool = False
     allow_unsafe_video_direct_fallback: bool = False
+    vision_provider_id: str = ""
+    vision_provider_id_backup: str = ""
     vision_api_url: str = ""
     vision_api_key: str = ""
     vision_api_model: str = ""
@@ -173,6 +181,22 @@ class PluginConfig(BaseModel):
             if normalized in {"screenshot", "image", "false", "0", "no", "off"}:
                 return False
         return bool(v)
+
+    @field_validator("interaction_style_mode", mode="before")
+    @classmethod
+    def validate_interaction_style_mode(cls, v):
+        if isinstance(v, InteractionStyleMode):
+            return v
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in {"", "普通", "normal", "default"}:
+                return InteractionStyleMode.NORMAL
+            if normalized in {"陪伴", "companion"}:
+                return InteractionStyleMode.COMPANION
+            if normalized in {"偷看", "stealth", "watch"}:
+                return InteractionStyleMode.STEALTH
+        logger.warning(f"[Config] 未识别的 interaction_style_mode={v!r}，已回退为普通模式")
+        return InteractionStyleMode.NORMAL
 
     @field_validator('check_interval')
     @classmethod
@@ -338,6 +362,30 @@ class PluginConfig(BaseModel):
 
     @model_validator(mode='after')
     def check_interval_vs_recording_duration(self):
+        explicit_style_mode = "interaction_style_mode" in getattr(
+            self, "model_fields_set", set()
+        )
+        if explicit_style_mode:
+            style_mode = self.interaction_style_mode
+        elif self.stealth_watch_mode:
+            style_mode = InteractionStyleMode.STEALTH
+        elif self.use_companion_mode:
+            style_mode = InteractionStyleMode.COMPANION
+        else:
+            style_mode = InteractionStyleMode.NORMAL
+
+        object.__setattr__(self, "interaction_style_mode", style_mode)
+        object.__setattr__(
+            self,
+            "use_companion_mode",
+            style_mode == InteractionStyleMode.COMPANION,
+        )
+        object.__setattr__(
+            self,
+            "stealth_watch_mode",
+            style_mode == InteractionStyleMode.STEALTH,
+        )
+
         if self.screen_recognition_mode and self.check_interval < self.recording_duration_seconds:
             raise ValueError(
                 f'录屏模式下，检查间隔不能小于录屏时长！\n'

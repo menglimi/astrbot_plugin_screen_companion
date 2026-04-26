@@ -2,13 +2,13 @@
   "bot_name": {
     "description": "角色名称",
     "type": "string",
-    "hint": "Bot 在对话、日记和状态文案里使用的名字，不影响 AstrBot 账号本身的昵称。",
+    "hint": "Bot 在对话、日记和状态里使用的名字。",
     "default": "屏幕助手"
   },
   "system_prompt": {
     "description": "系统提示词",
     "type": "text",
-    "hint": "定义这位屏幕伙伴的人设、语气和边界。建议写成“你是谁 + 怎么说话 + 尽量别做什么”三段。留空时会优先沿用 AstrBot 当前人格，只有在取不到人格时才回退到插件内置默认提示词。",
+    "hint": "选填，可留空。控制 Bot 的人设、语气和边界；不填就沿用 AstrBot 当前人格。",
     "default": "",
     "editor_mode": true,
     "editor_language": "text",
@@ -19,14 +19,14 @@
   "enabled": {
     "description": "是否开启自动截图互动",
     "type": "bool",
-    "hint": "自动观察总开关。开启后才会按检查间隔执行主动识屏；关闭后，手动命令、WebUI 和部分独立能力仍可继续使用。",
+    "hint": "自动观察总开关。关闭后仍可继续用手动识屏和 WebUI。",
     "default": false
   },
 
   "interaction_mode": {
     "description": "互动模式",
     "type": "string",
-    "hint": "选择'自定义'使用下方手动配置的参数。",
+    "hint": "目前保留为“自定义”。",
     "default": "自定义",
     "enum": [
       "自定义"
@@ -38,7 +38,7 @@
   "check_interval": {
     "description": "检查间隔",
     "type": "int",
-    "hint": "每隔多少秒做一次“要不要触发”的判定。值越小越灵敏，值越大越省资源；日常建议从 60 到 300 秒之间调。",
+    "hint": "每隔多少秒判断一次要不要主动识屏。越小越频繁。",
     "default": 300,
     "obvious_hint": true,
     "condition": {
@@ -48,7 +48,7 @@
   "trigger_probability": {
     "description": "触发概率",
     "type": "int",
-    "hint": "每次判定真正触发识屏的概率（0-100）。想让它更安静就调低，想让它更爱插话就调高。",
+    "hint": "每次判定真正触发的概率（0-100）。越高越容易主动说话。",
     "default": 30,
     "obvious_hint": true,
     "condition": {
@@ -58,7 +58,7 @@
   "active_time_range": {
     "description": "活跃时间段",
     "type": "string",
-    "hint": "限制自动观察只在这段时间内运行。格式为 `HH:MM-HH:MM`，例如 `09:00-22:00`；支持跨天，如 `22:00-06:00`；留空表示全天都可能触发。",
+    "hint": "选填，可留空。限制自动观察只在这段时间内运行。格式：`HH:MM-HH:MM`，如 `09:00-22:00`；留空表示全天。",
     "default": "",
     "obvious_hint": true,
     "condition": {
@@ -68,7 +68,7 @@
   "custom_presets": {
     "description": "自定义预设",
     "type": "text",
-    "hint": "给常用组合做快捷档位。格式：`预设名|检查间隔秒|触发概率`，每行一个，例如：\n轻陪伴|180|20\n高频盯屏|60|45",
+    "hint": "选填，可留空。常用配置模板。格式：`预设名|检查间隔秒|触发概率`，每行一个。",
     "default": "",
     "editor_mode": true,
     "editor_language": "text",
@@ -79,18 +79,23 @@
   "current_preset_index": {
     "description": "当前使用的预设",
     "type": "int",
-    "hint": "填写要启用的预设序号，从 0 开始；填 `-1` 表示不用预设，直接使用当前手动填写的参数。",
+    "hint": "要启用的预设序号，从 0 开始；填 `-1` 表示不用预设。",
     "default": -1,
     "obvious_hint": true,
     "condition": {
       "enabled": true
     }
   },
-  "use_companion_mode": {
-    "description": "使用陪伴模式",
-    "type": "bool",
-    "hint": "只影响回复时附加的人格约束和语气，不等于开始自动观察，也不改变任务调度频率。开启后会更强调连续陪伴、顺势互动；关闭后则使用普通观察风格。",
-    "default": false,
+  "interaction_style_mode": {
+    "description": "互动风格",
+    "type": "string",
+    "hint": "三选一。陪伴更连续，偷看更低打扰，普通最中性。",
+    "default": "普通",
+    "enum": [
+      "普通",
+      "陪伴",
+      "偷看"
+    ],
     "condition": {
       "enabled": true
     }
@@ -98,28 +103,19 @@
   "companion_prompt": {
     "description": "陪伴模式专用人格",
     "type": "text",
-    "hint": "仅在开启陪伴模式时使用。留空时会沿用上面的系统提示词或 AstrBot 当前人格，只额外追加陪伴式约束；填写后可单独定义陪伴模式下的人设和语气。",
+    "hint": "选填，可留空。只在“陪伴”风格下生效；不填就沿用上面的系统提示词。",
     "default": "",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
       "enabled": true,
-      "use_companion_mode": true
-    }
-  },
-  "stealth_watch_mode": {
-    "description": "偷看模式",
-    "type": "bool",
-    "hint": "开启后会把回复调整得更像悄悄注意到一点变化后顺手接一句，减少“我看到你正在……”这种直白监控腔，更适合低打扰陪伴。",
-    "default": false,
-    "condition": {
-      "enabled": true
+      "interaction_style_mode": "陪伴"
     }
   },
   "enable_usage_context_autopilot": {
     "description": "允许自动参考使用情况",
     "type": "bool",
-    "hint": "开启后，bot 会自行判断这轮是否需要参考电脑使用轨迹，例如最近用了哪些应用、停留了多久、最近在浏览什么页面。默认只作为旁证，不会每次都展开复述。",
+    "hint": "允许 Bot 在需要时参考最近的应用、页面和停留时长。",
     "default": false,
     "condition": {
       "enabled": true
@@ -128,7 +124,7 @@
   "enable_local_browser_history": {
     "description": "允许读取本地浏览器历史",
     "type": "bool",
-    "hint": "仅在“允许自动参考使用情况”开启后生效。开启后，插件会在需要时从本机 Chromium 浏览器历史中读取最近访问记录作为旁证，隐私敏感场景建议关闭。",
+    "hint": "允许从本机 Chromium 浏览器历史中读取最近访问记录。更敏感，不需要就别开。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -138,7 +134,7 @@
   "usage_context_lookback_hours": {
     "description": "使用轨迹回看时长（小时）",
     "type": "int",
-    "hint": "bot 在自动参考电脑使用情况时，最多回看最近多少小时的活动轨迹。",
+    "hint": "最多回看最近多少小时的活动轨迹。",
     "default": 6,
     "min": 1,
     "max": 72,
@@ -150,7 +146,7 @@
   "browser_history_lookback_minutes": {
     "description": "浏览历史回看时长（分钟）",
     "type": "int",
-    "hint": "读取本地浏览器历史时，最多回看最近多少分钟。值越大覆盖越广，但更容易带来无关信息。",
+    "hint": "读取浏览历史时最多回看最近多少分钟。",
     "default": 180,
     "min": 10,
     "max": 1440,
@@ -163,7 +159,7 @@
   "usage_context_item_limit": {
     "description": "使用情况最多参考条数",
     "type": "int",
-    "hint": "每次最多提炼多少条使用情况线索给 bot，当作辅助上下文。",
+    "hint": "每次最多参考多少条使用情况线索。",
     "default": 6,
     "min": 1,
     "max": 12,
@@ -175,7 +171,7 @@
   "screen_recognition_mode": {
     "description": "开启视频识别",
     "type": "bool",
-    "hint": "开启后用一小段桌面录屏做识别素材；关闭后只看当前截图。录屏更适合连续操作场景，但更吃时间、体积和 token。",
+    "hint": "开启后用短录屏识别；关闭后只看当前截图。录屏更适合连续操作。",
     "default": false,
     "condition": {
       "enabled": true
@@ -184,7 +180,7 @@
   "ffmpeg_path": {
     "description": "ffmpeg 可执行文件路径",
     "type": "string",
-    "hint": "只在录屏模式下需要。留空会自动查找；手动填写时请填 `ffmpeg.exe` 的绝对路径。默认优先查找插件数据目录下的 `bin/ffmpeg.exe`。",
+    "hint": "选填，可留空。只在录屏模式下需要；一般留空自动查找。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -194,7 +190,7 @@
   "recording_fps": {
     "description": "录屏帧率",
     "type": "float",
-    "hint": "录屏模式下每秒采样的帧数，支持小数。值越高画面越完整，但体积和 token 也会涨；大多数场景保持 1 就够用。",
+    "hint": "录屏每秒采多少帧。越高越清楚，也越费资源。",
     "default": 1,
     "min": 0.01,
     "max": 30,
@@ -206,7 +202,7 @@
   "recording_duration_seconds": {
     "description": "录屏时长（秒）",
     "type": "int",
-    "hint": "每次录多长时间。越长越容易保留完整操作过程，但也会增加上传体积、分析耗时和 token 消耗。",
+    "hint": "每次录多长时间。越长越完整，也越费时间和 token。",
     "default": 10,
     "min": 1,
     "max": 300,
@@ -218,7 +214,7 @@
   "capture_active_window": {
     "description": "只截取活动窗口",
     "type": "bool",
-    "hint": "截图模式下，开启后只截当前正在操作的窗口，关闭则截全屏。想减少无关信息时建议开启，但部分环境下可能不稳定。",
+    "hint": "截图模式下只截当前窗口，不截全屏。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -228,7 +224,7 @@
   "bot_vision_quality": {
     "description": "Bot 近视程度",
     "type": "int",
-    "hint": "值越高看得越清楚（0-100），建议保持在85+",
+    "hint": "值越高看得越清楚（0-100）。",
     "default": 100,
     "min": 1,
     "max": 100,
@@ -239,7 +235,7 @@
   "image_prompt": {
     "description": "图像识别提示词",
     "type": "text",
-    "hint": "告诉视觉模型该重点看什么。建议优先要求输出“当前任务、进行到哪一步、关键异常、一个建议点”，并尽量简短，避免把 token 花在大段界面描述上。",
+    "hint": "告诉视觉模型重点看什么。建议短一点，优先任务、进度、异常和建议。",
     "default": "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。",
     "editor_mode": true,
     "editor_language": "text",
@@ -248,9 +244,9 @@
     }
   },
   "use_external_vision": {
-    "description": "优先调用外部视觉API",
+    "description": "优先走视觉 provider 两段链路",
     "type": "bool",
-    "hint": "开启后，先由外部视觉 API 识别，再交给 AstrBot 组织回复；关闭后，直接把图片或视频作为多模态输入发给当前 provider。一般来说，开启会更稳。",
+    "hint": "开启后先走视觉 provider 做识别，再交给聊天模型回复。一般建议开启。",
     "default": true,
     "condition": {
       "enabled": true
@@ -259,7 +255,7 @@
   "allow_unsafe_video_direct_fallback": {
     "description": "允许兼容视频直发回退",
     "type": "bool",
-    "hint": "仅在“关闭外部视觉 API + 开启录屏识别”时生效。开启后会尝试把录屏直接发给当前 provider，兼容性和成本都更不确定，通常只在排障或特定 provider 下再开。",
+    "hint": "录屏直发当前 provider 的兼容回退开关。通常只在排障时使用。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -267,61 +263,23 @@
       "screen_recognition_mode": true
     }
   },
-  "vision_api_url": {
-    "description": "视觉API地址",
+  "vision_provider_id": {
+    "description": "视觉识别模型提供商",
     "type": "string",
-    "hint": "外部视觉模型接口地址，例如兼容 OpenAI Chat Completions 的视觉接口 URL。",
     "default": "",
+    "hint": "选填。开启视觉 provider 两段链路后建议填写；不填时会继续走兼容兜底逻辑。",
+    "_special": "select_provider",
     "condition": {
       "enabled": true,
       "use_external_vision": true
     }
   },
-  "vision_api_key": {
-    "description": "视觉API密钥",
+  "vision_provider_id_backup": {
+    "description": "备用视觉模型提供商",
     "type": "string",
-    "hint": "外部视觉接口的鉴权密钥。",
     "default": "",
-    "condition": {
-      "enabled": true,
-      "use_external_vision": true
-    }
-  },
-  "vision_api_model": {
-    "description": "视觉API模型",
-    "type": "string",
-    "hint": "外部视觉接口要使用的模型名称，例如某个视觉大模型的 model id。",
-    "default": "",
-    "condition": {
-      "enabled": true,
-      "use_external_vision": true
-    }
-  },
-  "vision_api_url_backup": {
-    "description": "备用视觉API地址",
-    "type": "string",
-    "hint": "备用外接视觉API的URL地址，当主API失败时使用。",
-    "default": "",
-    "condition": {
-      "enabled": true,
-      "use_external_vision": true
-    }
-  },
-  "vision_api_key_backup": {
-    "description": "备用视觉API密钥",
-    "type": "string",
-    "hint": "备用外接视觉API的密钥。",
-    "default": "",
-    "condition": {
-      "enabled": true,
-      "use_external_vision": true
-    }
-  },
-  "vision_api_model_backup": {
-    "description": "备用视觉API模型",
-    "type": "string",
-    "hint": "备用外接视觉API使用的模型名称。",
-    "default": "",
+    "hint": "选填，可留空。主 provider 失败时回退到这里。",
+    "_special": "select_provider",
     "condition": {
       "enabled": true,
       "use_external_vision": true
@@ -330,7 +288,7 @@
   "enable_privacy_guard": {
     "description": "开启隐私输出保护",
     "type": "bool",
-    "hint": "建议保持开启。开启后会额外提醒模型少直接复述屏幕里的敏感文本，更偏向总结和提醒，而不是逐字念出来。",
+    "hint": "建议开启。尽量少直接复述屏幕里的敏感文本。",
     "default": true,
     "condition": {
       "enabled": true
@@ -339,7 +297,7 @@
   "user_preferences": {
     "description": "用户偏好设置",
     "type": "text",
-    "hint": "按场景告诉 Bot 应该怎么陪你。格式为“场景名 空格 描述”，每行一条，例如：`编程 先帮我定位问题，再给下一步建议`。",
+    "hint": "按场景写你希望 Bot 怎么陪你。格式：`场景名 空格 描述`，每行一条。",
     "default": "游戏 专业的游戏高手，指导玩家提升水平",
     "editor_mode": true,
     "editor_language": "text",
@@ -350,7 +308,7 @@
   "use_llm_for_start_end": {
     "description": "使用 LLM 回复开始和结束消息",
     "type": "bool",
-    "hint": "开启后，开始/结束自动观察时会临场生成一句更贴合当前人格的文案；关闭则固定使用下面的预设文本。",
+    "hint": "开启后，开始/结束观察时自动生成一句话；关闭则使用固定文案。",
     "default": true,
     "condition": {
       "enabled": true
@@ -359,7 +317,7 @@
   "start_preset": {
     "description": "开始预设回复",
     "type": "string",
-    "hint": "不使用 LLM 时的开始回复内容",
+    "hint": "关闭 LLM 生成时，开始观察后发送的固定文案。",
     "default": "知道啦~我会时不时过来看一眼的",
     "condition": {
       "enabled": true,
@@ -369,7 +327,7 @@
   "end_preset": {
     "description": "结束预设回复",
     "type": "string",
-    "hint": "不使用 LLM 时的结束回复内容",
+    "hint": "关闭 LLM 生成时，结束观察后发送的固定文案。",
     "default": "好啦，我不看了～下次再陪你玩！",
     "condition": {
       "enabled": true,
@@ -379,7 +337,7 @@
   "start_llm_prompt": {
     "description": "开始 LLM 提示词",
     "type": "text",
-    "hint": "使用 LLM 时的开始回复提示词",
+    "hint": "开始观察文案的生成提示词。",
     "default": "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
@@ -391,7 +349,7 @@
   "end_llm_prompt": {
     "description": "结束 LLM 提示词",
     "type": "text",
-    "hint": "使用 LLM 时的结束回复提示词",
+    "hint": "结束观察文案的生成提示词。",
     "default": "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
@@ -403,7 +361,7 @@
   "enable_diary": {
     "description": "启用日记功能",
     "type": "bool",
-    "hint": "开启后，Bot 会在指定时间根据当天观察记录生成一篇日记式回顾。适合想长期积累陪伴感和活动记录时打开。",
+    "hint": "开启后，Bot 会按时生成当天的日记式回顾。",
     "default": true,
     "condition": {
       "enabled": true
@@ -412,7 +370,7 @@
   "diary_time": {
     "description": "日记生成时间",
     "type": "string",
-    "hint": "每天自动生成日记的时间，格式为 `HH:MM`，例如 `00:00`。建议设置在你通常收工或睡前之后。",
+    "hint": "每天自动生成日记的时间。格式：`HH:MM`，如 `00:00`。",
     "default": "00:00",
     "condition": {
       "enabled": true,
@@ -422,7 +380,7 @@
   "diary_storage": {
     "description": "日记存储路径",
     "type": "string",
-    "hint": "日记 Markdown 文件的存储目录。留空时使用插件默认目录，除非你有单独备份或同步需求，否则通常不用改。",
+    "hint": "选填，可留空。日记存储目录；不填就使用插件默认目录。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -432,7 +390,7 @@
   "diary_reference_days": {
     "description": "日记参考天数",
     "type": "int",
-    "hint": "生成当天日记时，会顺带参考前几天的内容来保持语气和上下文连续。填 0 表示完全只看当天。",
+    "hint": "生成当天日记时，顺带参考前几天的内容。填 0 表示只看当天。",
     "default": 2,
     "condition": {
       "enabled": true,
@@ -442,7 +400,7 @@
   "diary_auto_recall": {
     "description": "是否自动撤回日记",
     "type": "bool",
-    "hint": "开启后，发出去的日记消息会在设定时间后自动撤回，适合只想短暂看一下、不想长期留在聊天记录里。",
+    "hint": "开启后，发出去的日记会在设定时间后自动撤回。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -452,7 +410,7 @@
   "diary_recall_time": {
     "description": "日记自动撤回时间（秒）",
     "type": "int",
-    "hint": "发送日记消息后多少秒自动撤回，默认30秒。",
+    "hint": "发送日记后多少秒自动撤回。",
     "default": 30,
     "condition": {
       "enabled": true,
@@ -464,7 +422,7 @@
   "diary_send_as_image": {
     "description": "以图片形式发送日记",
     "type": "bool",
-    "hint": "开启后，日记会渲染成图片发送，更适合长文阅读和分享；关闭则直接发文本。",
+    "hint": "开启后，日记会转成图片发送；关闭则直接发文本。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -475,7 +433,7 @@
   "diary_generation_prompt": {
     "description": "日记生成提示词",
     "type": "text",
-    "hint": "控制日记的文风和侧重点。建议写“像谁在写、想保留什么情绪、尽量别写成什么腔调”这类约束。",
+    "hint": "控制日记的文风和侧重点。",
     "default": "请根据今天的观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。",
     "editor_mode": true,
     "editor_language": "text",
@@ -487,7 +445,7 @@
   "weather_api_key": {
     "description": "天气API密钥",
     "type": "string",
-    "hint": "用于获取天气信息的API密钥，例如OpenWeatherMap的API密钥。留空则不启用天气感知功能。",
+    "hint": "选填，可留空。不填就不启用天气功能。",
     "default": "",
     "condition": {
       "enabled": true
@@ -496,7 +454,7 @@
   "weather_city": {
     "description": "城市名称",
     "type": "string",
-    "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
+    "hint": "选填，可留空。启用天气功能时再填城市名，例如 `Shanghai` 或 `上海`。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -506,7 +464,7 @@
   "enable_mic_monitor": {
     "description": "启用麦克风监听",
     "type": "bool",
-    "hint": "开启后会监听麦克风音量，音量持续超过阈值时可触发一次识屏回复。更适合直播、语音讲题、边说边操作这类场景。",
+    "hint": "开启后会监听麦克风音量，超过阈值时可触发一次识屏。",
     "default": false,
     "condition": {
       "enabled": true
@@ -515,7 +473,7 @@
   "mic_threshold": {
     "description": "麦克风音量阈值",
     "type": "int",
-    "hint": "麦克风音量高于这个值时才算命中触发。环境噪声多就调高，讲话轻或离麦远就调低。",
+    "hint": "麦克风音量高于这个值时才算触发。",
     "default": 60,
     "condition": {
       "enabled": true,
@@ -525,7 +483,7 @@
   "mic_check_interval": {
     "description": "麦克风检查间隔",
     "type": "int",
-    "hint": "每隔多少秒检查一次麦克风音量。值越小越灵敏，值越大越省资源。",
+    "hint": "每隔多少秒检查一次麦克风音量。",
     "default": 5,
     "condition": {
       "enabled": true,
@@ -535,7 +493,7 @@
   "enable_input_stats": {
     "description": "启用本地输入统计",
     "type": "bool",
-      "hint": "开启后会尝试监听全局键盘和鼠标输入，用来生成更像 KeyStats 的工作回顾。默认依赖已随基础安装提供，但系统可能仍需授予输入监听权限。",
+      "hint": "开启后统计键盘和鼠标输入，用来判断活跃度和生成回顾。",
     "default": false,
     "condition": {
       "enabled": true
@@ -544,7 +502,7 @@
   "enable_background_activity_tracking": {
     "description": "启用独立活动轨迹采集",
     "type": "bool",
-    "hint": "开启后，即使没有启动自动观察，也会按固定间隔记录当前活动窗口，并尽量拆出应用 / 网站 / 页面轨迹。自动观察运行中会继续优先使用识屏轨迹。",
+    "hint": "开启后会定时记录当前活动窗口，即使自动观察没开也会记录。",
     "default": false,
     "condition": {
       "enabled": true
@@ -553,7 +511,7 @@
   "background_activity_tracking_interval": {
     "description": "独立轨迹采样间隔",
     "type": "int",
-    "hint": "后台每隔多少秒采样一次当前活动窗口。值越小越细，值越大越省资源。",
+    "hint": "每隔多少秒记录一次当前活动窗口。",
     "default": 15,
     "min": 5,
     "max": 3600,
@@ -565,7 +523,7 @@
   "input_stats_flush_interval": {
     "description": "输入统计落盘间隔",
     "type": "int",
-    "hint": "每隔多少秒把输入统计写回本地 JSON。值越小越实时，值越大越省磁盘 IO。",
+    "hint": "每隔多少秒把输入统计写回本地文件。",
     "default": 60,
     "min": 10,
     "max": 3600,
@@ -577,7 +535,7 @@
   "enable_away_auto_pause": {
     "description": "离开电脑时自动挂起观察",
     "type": "bool",
-    "hint": "仅在启用本地输入统计后生效。非观影场景下，如果较长时间没有键鼠输入，就先暂停自动观察；检测到你回来后再自动恢复。",
+    "hint": "长时间没有键鼠输入时，自动观察会暂停；回来后自动恢复。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -587,7 +545,7 @@
   "away_auto_pause_threshold": {
     "description": "自动挂起阈值",
     "type": "int",
-    "hint": "连续多久没有输入后，认为用户已经暂时离开电脑前并挂起自动观察。",
+    "hint": "连续多久没有输入后，判定为离开电脑。",
     "default": 1200,
     "min": 300,
     "max": 14400,
@@ -600,7 +558,7 @@
   "away_long_notice_threshold": {
     "description": "长时间离开提醒阈值",
     "type": "int",
-    "hint": "离开时间超过这个阈值时，只额外发一次轻量提醒文案，然后继续安静等待。",
+    "hint": "离开多久后发一次轻提醒。",
     "default": 3600,
     "min": 600,
     "max": 86400,
@@ -613,7 +571,7 @@
   "mask_activity_window_titles": {
     "description": "活动页窗口标题脱敏",
     "type": "bool",
-    "hint": "开启后，活动统计、主力窗口和工作轨迹里的窗口标题会统一脱敏，更适合把插件长期挂着使用。",
+    "hint": "开启后，活动页里的窗口标题会统一脱敏。",
     "default": false,
     "condition": {
       "enabled": true
@@ -622,7 +580,7 @@
   "activity_recognition_rules": {
     "description": "活动识别自定义规则",
     "type": "text",
-    "hint": "每行一条，格式为 app|关键词|显示名 或 site|关键词/域名|显示名。支持 # 注释，例如：app|cursor.exe|Cursor 或 site|docs.company.com|公司文档。",
+    "hint": "每行一条。格式：`app|关键词|显示名` 或 `site|域名/关键词|显示名`，支持 `#` 注释。",
     "default": "",
     "condition": {
       "enabled": true
@@ -631,7 +589,7 @@
   "memory_threshold": {
     "description": "内存阈值",
     "type": "int",
-    "hint": "当内存使用率超过此阈值时，系统会提示用户注意资源使用情况，范围 0-100。",
+    "hint": "内存使用率超过这个值时提醒用户，范围 0-100。",
     "default": 80,
     "condition": {
       "enabled": true
@@ -640,7 +598,7 @@
   "battery_threshold": {
     "description": "电量阈值",
     "type": "int",
-    "hint": "当设备电量低于此阈值时，会提醒用户保存进度，范围 0-100。",
+    "hint": "设备电量低于这个值时提醒用户，范围 0-100。",
     "default": 20,
     "condition": {
       "enabled": true
@@ -649,7 +607,7 @@
   "admin_qq": {
     "description": "管理员QQ号",
     "type": "string",
-    "hint": "填写主要管理员或主人的 QQ 号，用于接收主动消息，也是部分管理员能力的兜底身份来源。",
+    "hint": "选填，可留空。管理员或主人的 QQ 号，用于主动消息和管理员能力识别。",
     "default": "",
     "condition": {
       "enabled": true
@@ -658,7 +616,7 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-      "hint": "填写接收主动消息的统一会话 ID（`unified_msg_origin`）。建议直接填实际会话，例如 `default:FriendMessage:123456`；不确定时可先从日志或事件里复制。",
+      "hint": "选填，可留空。接收主动消息的统一会话 ID，例如 `default:FriendMessage:123456`；不填就不主动推送。",
     "default": "",
     "condition": {
       "enabled": true
@@ -667,7 +625,7 @@
   "save_local": {
     "description": "是否在本地保留最近一次识别素材",
     "type": "bool",
-    "hint": "截图模式下会保留最近一次截图；录屏模式下会保留最近一次 mp4，方便排查识别结果。",
+    "hint": "是否在本地保留最近一次截图或录屏，方便排查。",
     "default": true,
     "condition": {
       "enabled": true
@@ -676,7 +634,7 @@
   "enable_natural_language_screen_assist": {
     "description": "启用自然语言识屏技能",
     "type": "bool",
-    "hint": "开启后，仅管理员可触发这项内置识屏技能。管理员在对话里明确求助，或在私聊里直接问“我现在在干嘛 / 这一步怎么做 / 这个报错什么意思 / 我卡哪了”这类当前界面问题时，Bot 会主动识屏后再回应。群聊里的隐式触发会更严格，通常需要明确叫到 Bot，默认关闭以减少误触。",
+    "hint": "开启后，管理员在对话里明确求助时，Bot 会主动识屏后再回答。",
     "default": false,
     "condition": {
       "enabled": true
@@ -685,7 +643,7 @@
   "screen_skill_prompt": {
     "description": "内置识屏技能提示词",
     "type": "text",
-    "hint": "给内置识屏技能补充额外约束，例如你希望它更像搭话、少下结论、优先回答报错或步骤。留空时会使用插件默认的识屏回复规则。",
+    "hint": "选填，可留空。给内置识屏技能补充额外约束；不填就使用默认规则。",
     "default": "",
     "editor_mode": true,
     "editor_language": "text",
@@ -697,7 +655,7 @@
   "use_shared_screenshot_dir": {
     "description": "启用共享截图目录",
     "type": "bool",
-    "hint": "主要给 Docker 或远程部署环境用。开启后，插件会优先从共享目录读取截图，而不是直接调用本机截图能力；普通桌面环境一般不用开。",
+    "hint": "主要给 Docker 或远程环境用。开启后优先从共享目录读取截图。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -707,7 +665,7 @@
   "shared_screenshot_dir": {
     "description": "共享截图目录路径",
     "type": "string",
-    "hint": "启用共享截图目录后才会生效。这里应填写宿主机或外部服务持续更新截图的那个目录。",
+    "hint": "选填，可留空。启用共享截图目录后再填这里的路径。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -718,7 +676,7 @@
   "custom_tasks": {
     "description": "自定义监控任务",
     "type": "text",
-    "hint": "设置固定时间触发的提示任务，格式为“时间 空格 提示词”，每行一条，例如：`02:00 这么晚了还在工作，记得休息`。",
+    "hint": "选填，可留空。定时提醒任务，格式：`时间 空格 提示词`，每行一条。",
     "default": "",
     "editor_mode": true,
     "editor_language": "text",
@@ -729,7 +687,7 @@
   "rest_time_range": {
     "description": "用户休息时间",
     "type": "string",
-    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。插件会优先根据最近几天最后一次窗口活动推测休息时间，并在接近该时点时每天仅提醒一次；这里会作为推测样本不足时的兜底范围。",
+    "hint": "用户通常休息的时间范围。格式：`HH:MM-HH:MM`，如 `22:00-06:00`。",
     "default": "22:00-06:00",
     "condition": {
       "enabled": true
@@ -738,7 +696,7 @@
   "enable_learning": {
     "description": "启用用户行为学习",
     "type": "bool",
-    "hint": "开启后，插件会根据你的反馈、纠正和共同体验逐步调整互动方式。想让它越用越贴合你，就保持开启。",
+    "hint": "开启后，插件会根据反馈逐步调整互动方式。",
     "default": true,
     "condition": {
       "enabled": true
@@ -747,7 +705,7 @@
   "learning_storage": {
     "description": "学习数据存储路径",
     "type": "string",
-    "hint": "学习数据的存储目录。留空时使用插件默认目录；只有你想单独备份、迁移或和别的目录做同步时再改。",
+    "hint": "选填，可留空。学习数据存储目录；不填就使用插件默认目录。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -757,7 +715,7 @@
   "bot_appearance": {
     "description": "Bot 外形描述",
     "type": "text",
-    "hint": "描述 Bot 的外形特征，用于在屏幕中识别自己。例如：一个蓝色头发的动漫女孩，穿着白色连衣裙，头上有猫耳。",
+    "hint": "选填，可留空。描述 Bot 的外形，供识别自己时参考。",
     "default": "",
     "condition": {
       "enabled": true
@@ -766,14 +724,14 @@
   "interaction_kpi": {
     "description": "快捷切换配置",
     "type": "int",
-    "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
+    "hint": "互动强度快捷档位：1 最轻，5 最重。",
     "default": 3,
     "enum": [1, 2, 3, 4, 5]
   },
   "debug": {
     "description": "调试模式",
     "type": "bool",
-    "hint": "开启后显示详细日志，关闭时隐藏大部分日志",
+    "hint": "开启后显示更详细的日志。",
     "default": false
   },
   "webui": {

@@ -345,9 +345,17 @@ class ScreenCompanionProactiveMixin:
         if not target or not text:
             return False
 
-        return await self._send_proactive_message(
+        sent = await self._send_proactive_message(
             target, MessageChain([Plain(text)])
         )
+        if sent:
+            remember_reply = getattr(self, "_remember_recent_assistant_reply", None)
+            if callable(remember_reply):
+                remember_reply(target, text)
+            remember_message = getattr(self, "_remember_recent_companion_message", None)
+            if callable(remember_message):
+                remember_message(target, "assistant", text)
+        return sent
 
     def _resolve_proactive_target(self, fallback_event: Any = None) -> str:
         target = self._get_default_target()

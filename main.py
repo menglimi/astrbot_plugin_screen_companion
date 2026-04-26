@@ -729,11 +729,13 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.check_interval = self.plugin_config.check_interval
         self.trigger_probability = self.plugin_config.trigger_probability
         self.active_time_range = self.plugin_config.active_time_range
-        self.use_companion_mode = self._coerce_bool(self.plugin_config.use_companion_mode)
+        style_mode = getattr(self.plugin_config, "interaction_style_mode", "普通")
+        if hasattr(style_mode, "value"):
+            style_mode = style_mode.value
+        self.interaction_style_mode = str(style_mode or "普通")
+        self.use_companion_mode = self.interaction_style_mode == "陪伴"
         self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '')
-        self.stealth_watch_mode = self._coerce_bool(
-            getattr(self.plugin_config, "stealth_watch_mode", False)
-        )
+        self.stealth_watch_mode = self.interaction_style_mode == "偷看"
         self.enable_usage_context_autopilot = self._coerce_bool(
             getattr(self.plugin_config, "enable_usage_context_autopilot", False)
         )
@@ -796,6 +798,12 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.allow_unsafe_video_direct_fallback = self._coerce_bool(
             getattr(self.plugin_config, "allow_unsafe_video_direct_fallback", False)
         )
+        self.vision_provider_id = str(
+            getattr(self.plugin_config, "vision_provider_id", "") or ""
+        ).strip()
+        self.vision_provider_id_backup = str(
+            getattr(self.plugin_config, "vision_provider_id_backup", "") or ""
+        ).strip()
         self.vision_api_url = self.plugin_config.vision_api_url
         self.vision_api_key = self.plugin_config.vision_api_key
         self.vision_api_model = self.plugin_config.vision_api_model
@@ -1553,6 +1561,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             if not message_text or message_text.startswith("/"):
                 return
             self._remember_recent_user_activity(event)
+            self._remember_recent_companion_message(
+                str(getattr(event, "unified_msg_origin", "") or ""),
+                "user",
+                message_text,
+            )
             self._consume_pending_shared_activity_followup(event, message_text)
             self._learn_shared_activity_from_message(message_text)
             await self._learn_from_user_feedback_message(event, message_text)

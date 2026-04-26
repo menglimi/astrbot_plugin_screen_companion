@@ -933,7 +933,7 @@ function getSettingsTemplatePresets() {
             preferredGroup: "runtime",
             updates: {
                 enabled: true,
-                use_companion_mode: true,
+                interaction_style_mode: "陪伴",
                 check_interval: 180,
                 trigger_probability: 45,
                 screen_recognition_mode: true,
@@ -949,7 +949,7 @@ function getSettingsTemplatePresets() {
             preferredGroup: "runtime",
             updates: {
                 enabled: true,
-                use_companion_mode: true,
+                interaction_style_mode: "陪伴",
                 check_interval: 300,
                 trigger_probability: 25,
                 capture_active_window: true,
@@ -967,7 +967,7 @@ function getSettingsTemplatePresets() {
             preferredGroup: "runtime",
             updates: {
                 enabled: true,
-                use_companion_mode: true,
+                interaction_style_mode: "偷看",
                 check_interval: 480,
                 trigger_probability: 12,
                 enable_window_companion: false,
@@ -983,7 +983,7 @@ function getSettingsTemplatePresets() {
             preferredGroup: "diary",
             updates: {
                 enabled: true,
-                use_companion_mode: false,
+                interaction_style_mode: "普通",
                 check_interval: 900,
                 trigger_probability: 5,
                 enable_window_companion: false,
@@ -1225,7 +1225,7 @@ function createSettingsInput(fieldKey, meta, value) {
     if (meta.type === "password") {
         input.autocomplete = "new-password";
         if (meta.sensitive && meta.configured) {
-            input.placeholder = "Leave blank to keep current value";
+            input.placeholder = "留空则保持当前值";
         }
     }
 
@@ -1267,8 +1267,8 @@ function renderRuntimeInsights(runtime) {
         {
             title: "\u8bc6\u522b\u94fe\u8def",
             body: runtime.use_external_vision
-                ? "\u5f53\u524d\u4f1a\u5148\u8c03\u7528\u5916\u90e8\u89c6\u89c9 API\uff0c\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210\u8bc6\u522b\u6587\u672c\u540e\uff0c\u518d\u4ea4\u7ed9 AstrBot \u7ed3\u5408\u4e0a\u4e0b\u6587\u56de\u590d\u3002"
-                : "\u5f53\u524d\u4e0d\u4f1a\u8c03\u7528\u5916\u90e8\u89c6\u89c9 API\uff0c\u800c\u662f\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210 base64 \u591a\u6a21\u6001\u6d88\u606f\uff0c\u76f4\u63a5\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002",
+                ? "\u5f53\u524d\u4f1a\u5148\u8c03\u7528\u9009\u5b9a\u7684 AstrBot \u89c6\u89c9 provider\uff0c\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210\u8bc6\u522b\u6587\u672c\u540e\uff0c\u518d\u4ea4\u7ed9 AstrBot \u7ed3\u5408\u4e0a\u4e0b\u6587\u56de\u590d\u3002"
+                : "\u5f53\u524d\u4e0d\u4f1a\u5148\u8d70\u89c6\u89c9 provider \u4e24\u6bb5\u94fe\u8def\uff0c\u800c\u662f\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u8f6c\u6210 base64 \u591a\u6a21\u6001\u6d88\u606f\uff0c\u76f4\u63a5\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002",
             actions: [{ label: "\u67e5\u770b\u89c6\u89c9\u94fe\u8def", action: "open-vision-group" }],
         },
         {
@@ -1555,15 +1555,15 @@ function renderSettingsHelper(activeGroup, currentValues) {
                     : [{ label: "\u5207\u5230 Docker \u6a21\u5f0f", action: "vision-docker" }],
         });
         cards.push({
-            title: currentValues.use_external_vision ? "\u5916\u90e8\u89c6\u89c9 API + AstrBot \u4e24\u6bb5\u94fe\u8def" : "\u76f4\u63a5 AstrBot \u591a\u6a21\u6001",
+            title: currentValues.use_external_vision ? "AstrBot \u89c6\u89c9 provider + AstrBot \u4e24\u6bb5\u94fe\u8def" : "\u76f4\u63a5 AstrBot \u591a\u6a21\u6001",
             body: currentValues.use_external_vision
-                ? "\u4f1a\u5148\u628a\u56fe\u50cf\u6216\u5f55\u5c4f\u4ea4\u7ed9\u5916\u90e8\u89c6\u89c9 API \u505a\u8bc6\u522b\uff0c\u518d\u7531 AstrBot \u751f\u6210\u6700\u7ec8\u56de\u590d\u3002\u4e00\u822c\u66f4\u7a33\uff0c\u4e5f\u66f4\u9002\u5408\u8bc6\u5c4f\u573a\u666f\u3002"
-                : "\u4e0d\u4f1a\u5148\u8d70\u5916\u90e8\u89c6\u89c9 API\uff0c\u800c\u662f\u76f4\u63a5\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u4f5c\u4e3a\u591a\u6a21\u6001\u8f93\u5165\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002\u53ea\u6709\u5f53\u524d provider \u771f\u6b63\u652f\u6301\u5bf9\u5e94\u56fe\u50cf/\u89c6\u9891\u8f93\u5165\u65f6\u624d\u9002\u5408\u8fd9\u4e48\u914d\u3002",
+                ? "\u4f1a\u5148\u628a\u56fe\u50cf\u6216\u5f55\u5c4f\u4ea4\u7ed9\u9009\u5b9a\u7684 AstrBot \u89c6\u89c9 provider \u505a\u8bc6\u522b\uff0c\u518d\u7531 AstrBot \u751f\u6210\u6700\u7ec8\u56de\u590d\u3002\u4e00\u822c\u66f4\u7a33\uff0c\u4e5f\u66f4\u9002\u5408\u8bc6\u5c4f\u573a\u666f\u3002"
+                : "\u4e0d\u4f1a\u5148\u8d70\u89c6\u89c9 provider \u4e24\u6bb5\u94fe\u8def\uff0c\u800c\u662f\u76f4\u63a5\u628a\u622a\u56fe\u6216\u5f55\u5c4f\u4f5c\u4e3a\u591a\u6a21\u6001\u8f93\u5165\u53d1\u7ed9 AstrBot \u5f53\u524d provider\u3002\u53ea\u6709\u5f53\u524d provider \u771f\u6b63\u652f\u6301\u5bf9\u5e94\u56fe\u50cf/\u89c6\u9891\u8f93\u5165\u65f6\u624d\u9002\u5408\u8fd9\u4e48\u914d\u3002",
             actions: [],
         });
         cards.push({
             title: "\u8bc6\u5c4f\u8c03\u53c2\u5efa\u8bae",
-            body: "\u60f3\u8981\u770b\u5f97\u66f4\u7a33\uff0c\u4f18\u5148\u5148\u51b3\u5b9a\u201c\u622a\u56fe or \u5f55\u5c4f\u201d\uff0c\u518d\u51b3\u5b9a\u201c\u5916\u90e8\u89c6\u89c9 API or \u76f4\u63a5 provider\u201d\u3002\u60f3\u8981\u7701 token\uff0c\u5c31\u8ba9 image_prompt \u5c3d\u91cf\u53ea\u8981\u6c42\u8f93\u51fa\u4efb\u52a1\u3001\u9636\u6bb5\u3001\u5f02\u5e38\u7ebf\u7d22\u548c\u4e00\u4e2a\u5efa\u8bae\u70b9\u3002",
+            body: "\u60f3\u8981\u770b\u5f97\u66f4\u7a33\uff0c\u4f18\u5148\u5148\u51b3\u5b9a\u201c\u622a\u56fe or \u5f55\u5c4f\u201d\uff0c\u518d\u51b3\u5b9a\u201cAstrBot \u89c6\u89c9 provider \u4e24\u6bb5\u94fe\u8def or \u76f4\u63a5 provider\u201d\u3002\u60f3\u8981\u7701 token\uff0c\u5c31\u8ba9 image_prompt \u5c3d\u91cf\u53ea\u8981\u6c42\u8f93\u51fa\u4efb\u52a1\u3001\u9636\u6bb5\u3001\u5f02\u5e38\u7ebf\u7d22\u548c\u4e00\u4e2a\u5efa\u8bae\u70b9\u3002",
             actions: [],
         });
     }
@@ -1726,6 +1726,9 @@ function renderSettingsForm() {
         ];
         if (isSettingDirty(fieldKey)) {
             badges.unshift('<span class="settings-badge settings-badge-warm">已修改</span>');
+        }
+        if (meta.optional) {
+            badges.push('<span class="settings-badge">选填</span>');
         }
 
         const header = document.createElement("div");

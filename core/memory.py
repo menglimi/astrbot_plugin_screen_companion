@@ -2546,21 +2546,25 @@ class ScreenCompanionMemoryMixin:
             "不要编造，不要过度延伸到当前判断之外的话题。",
             "不要使用 Markdown、加粗、标题、分点或括号旁白。",
             "少用夸张语气词、重复感叹和机械鼓劲，宁可自然一点也不要像脚本播报。",
-            "避免每次都用相同开场；尤其不要反复写“原来在……呀”“刚才那波……好激烈”“我就在这里陪着你”“加油加油”这类套话。",
+            "避免每次都用相同开场；尤其不要反复写“原来你在……”“原来在……呀”“刚才那波……好激烈”“我就在这里陪着你”“加油加油”这类套话。",
             "如果这一轮只有一条小观察，就直接说重点，不必硬凑成两三句完整播报。",
             "不要把模糊观察硬写成非常具体的人名、角色名、道具名、地点名或技能名。",
+            "默认不要先解释自己看到了什么，而是把观察消化成判断后直接接话。",
         ]
 
         if bool(getattr(self, "use_companion_mode", False)):
             guide_parts.append(
-                "陪伴模式下，更关注一段时间内的状态延续；必要时可以顺手引用最近的电脑使用状态，但不要喧宾夺主。"
+                "陪伴模式下，更关注一段时间内的状态延续；你的主要任务是知道用户在做什么、状态如何，再顺着聊天自然回应。"
+            )
+            guide_parts.append(
+                "必要时可以顺手引用最近的电脑使用状态，但它只是理解背景，不要喧宾夺主，也不要写成观察播报。"
             )
         if bool(getattr(self, "stealth_watch_mode", False)):
             guide_parts.append(
-                "偷看模式下，尽量减少直白监控腔，不要反复写“我看到你”“我刚刚看见你在……”。"
+                "偷看模式下，重点是对用户的行为变化做出反应，比如卡住、切窗口、停顿、结束一局、进入新阶段。"
             )
             guide_parts.append(
-                "更像悄悄注意到一点变化后顺口说一句：低调、贴近、不过度揭穿。"
+                "尽量减少直白监控腔，不要反复写“我看到你”“我刚刚看见你在……”；更像悄悄注意到一点变化后顺口说一句。"
             )
 
         if scene in ("视频", "阅读"):
@@ -5172,6 +5176,7 @@ class ScreenCompanionMemoryMixin:
         guidance_lines = [
             "把这次回复当成社交媒体私聊里的连续聊天，不要像重新开一个新话题。",
             "优先像人类顺手接话：短一点、自然一点、留白一点。",
+            "观察只是你心里的依据，不是必须先说出口的开场白。",
         ]
         if self._normalize_scene_label(scene) == "游戏":
             guidance_lines.extend(
@@ -5341,8 +5346,13 @@ class ScreenCompanionMemoryMixin:
         )
         include_browser_activity = bool(
             request_flags["browser"]
-            or browser_scene
-            or getattr(self, "stealth_watch_mode", False)
+            or (
+                browser_scene
+                and (
+                    getattr(self, "stealth_watch_mode", False)
+                    or request_flags["browser"]
+                )
+            )
         )
         include_local_browser_history = bool(
             getattr(self, "enable_local_browser_history", False)
@@ -5366,9 +5376,9 @@ class ScreenCompanionMemoryMixin:
         if request_flags["browser"]:
             reasons.append("用户这轮像是在问浏览过哪些页面")
         if getattr(self, "use_companion_mode", False):
-            reasons.append("陪伴模式允许参考持续使用状态")
+            reasons.append("陪伴模式允许低调参考持续状态，用来理解用户在做什么")
         if getattr(self, "stealth_watch_mode", False):
-            reasons.append("偷看模式更适合低调结合使用轨迹判断状态")
+            reasons.append("偷看模式更适合结合行为变化做反应")
         if browser_scene:
             reasons.append("当前场景本身就是浏览器/页面相关")
 
@@ -6019,14 +6029,31 @@ class ScreenCompanionMemoryMixin:
         return any(keyword in normalized for keyword in keywords)
 
     def _strip_repeated_companion_opening(self, text: str, *, has_recent_context: bool) -> str:
-        if not has_recent_context:
-            return str(text or "").strip()
-
         import re
 
         cleaned = str(text or "").strip()
         cleaned = re.sub(r"^(笨蛋|傻瓜|喂|欸|哎呀|哼)[，,、\s]+", "", cleaned, count=1)
+        cleaned = re.sub(
+            r"^(原来(?:你)?在)(?=\S)",
+            "",
+            cleaned,
+            count=1,
+        )
+        cleaned = re.sub(
+            r"^(原来(?:你)?刚刚在)(?=\S)",
+            "",
+            cleaned,
+            count=1,
+        )
+        cleaned = re.sub(
+            r"^(原来是你在)(?=\S)",
+            "",
+            cleaned,
+            count=1,
+        )
         cleaned = re.sub(r"^(又在|还在|现在在)看", "在看", cleaned, count=1)
+        if not has_recent_context:
+            return cleaned.strip()
         return cleaned.strip()
 
     def _strip_rest_cue_sentences(self, text: str) -> str:

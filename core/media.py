@@ -165,6 +165,11 @@ class ScreenCompanionMediaMixin:
             response_text,
             has_recent_context=has_recent_context,
         )
+        response_text = self._strip_objective_screen_opening(
+            response_text,
+            has_recent_context=has_recent_context,
+        )
+        response_text = self._soften_screen_reply_phrasing(response_text)
 
         if (
             not allow_rest_hint
@@ -340,6 +345,7 @@ class ScreenCompanionMediaMixin:
             "只根据当前画面与上文里能确认的事实回答。",
             "如果看不清或证据不够，直接承认不确定，不要硬猜。",
             "不要编造未看到的具体结果、文档内容、按钮状态、聊天对象或任务结论。",
+            "不要把回复写成“你在……啊”“现在在……呢”“屏幕上是……”这类先客观播报画面的开场。",
         ]
         if normalized_scene == "游戏":
             guide_lines.extend(
@@ -661,6 +667,51 @@ class ScreenCompanionMediaMixin:
         for source, target in replacements:
             softened = softened.replace(source, target)
         return softened.strip()
+
+    def _strip_objective_screen_opening(
+        self,
+        text: str,
+        *,
+        has_recent_context: bool = False,
+    ) -> str:
+        import re
+
+        original = str(text or "").strip()
+        if not original:
+            return ""
+
+        cleaned = original
+        leading_patterns = [
+            (
+                r"^(?:你现在|你这会儿|你这边|你刚才|你刚刚|现在|这会儿|这边)\s*"
+                r"(?:在|还在|又在|正在)\s*[^。！？!?]{2,40}?(?:啊|呀|呢|哦|欸)[，,。！？!?]?\s*",
+                "",
+            ),
+            (
+                r"^(?:是在|这是在|看起来是在)\s*[^。！？!?]{2,40}?(?:啊|呀|呢|哦)[，,。！？!?]?\s*",
+                "",
+            ),
+            (
+                r"^(?:你这是|你这把是在|你这局是在)\s*[^。！？!?]{2,40}?(?:啊|呀|呢|哦)[，,。！？!?]?\s*",
+                "",
+            ),
+        ]
+        for pattern, replacement in leading_patterns:
+            cleaned = re.sub(pattern, replacement, cleaned, count=1)
+
+        if cleaned != original:
+            cleaned = cleaned.lstrip("，,。！？!?、 ")
+
+        if has_recent_context:
+            cleaned = re.sub(
+                r"^(?:刚才|现在|这会儿|这边)\s*[^。！？!?]{2,20}?(?:啊|呀|呢)[，,。！？!?]?\s*",
+                "",
+                cleaned,
+                count=1,
+            )
+
+        cleaned = cleaned.strip()
+        return cleaned or original
 
     def _trim_overstyled_screen_sentences(self, text: str) -> str:
         import re
@@ -1025,6 +1076,80 @@ class ScreenCompanionMediaMixin:
                 reverse=True,
             )
             self._recent_assistant_replies = dict(sorted_items[:100])
+
+    def _remember_recent_companion_message(
+        self,
+        target: str,
+        role: str,
+        text: str,
+        *,
+        scene: str = "",
+        window_title: str = "",
+    ) -> None:
+        target = str(target or "").strip()
+        role = str(role or "").strip()
+        text = str(text or "").strip()
+        if not target or role not in {"user", "assistant"} or not text:
+            return
+
+        state = getattr(self, "_recent_companion_messages", None)
+        if not isinstance(state, dict):
+            state = {}
+            self._recent_companion_messages = state
+
+        messages = list(state.get(target, []) or [])
+        messages.append(
+            {
+                "role": role,
+                "text": text[:500],
+                "scene": self._normalize_scene_label(scene) if scene else "",
+                "window_title": self._normalize_window_title(window_title),
+                "timestamp": time.time(),
+            }
+        )
+
+        max_items = 12
+        if len(messages) > max_items:
+            messages = messages[-max_items:]
+        state[target] = messages
+
+    def _get_recent_companion_message_context(
+        self,
+        target: str,
+        *,
+        limit: int = 6,
+        max_age_seconds: int = 7200,
+    ) -> list[str]:
+        target = str(target or "").strip()
+        if not target:
+            return []
+
+        state = getattr(self, "_recent_companion_messages", None)
+        if not isinstance(state, dict):
+            return []
+
+        messages = list(state.get(target, []) or [])
+        if not messages:
+            return []
+
+        now_ts = time.time()
+        lines: list[str] = []
+        for item in messages[-max(1, int(limit or 1)) :]:
+            if not isinstance(item, dict):
+                continue
+
+            timestamp = float(item.get("timestamp", 0.0) or 0.0)
+            if timestamp and now_ts - timestamp > max_age_seconds:
+                continue
+
+            role = str(item.get("role", "") or "").strip()
+            text = str(item.get("text", "") or "").strip()
+            if role not in {"user", "assistant"} or not text:
+                continue
+
+            label = "用户" if role == "user" else "助手"
+            lines.append(f"{label}: {text}")
+        return lines
 
     def _get_recent_assistant_reply_snapshot(
         self,
@@ -2326,6 +2451,17 @@ class ScreenCompanionMediaMixin:
                                 text_content,
                                 should_continue=lambda: self.is_running,
                             )
+                            if sent:
+                                self._remember_recent_assistant_reply(
+                                    target, text_content
+                                )
+                                self._remember_recent_companion_message(
+                                    target,
+                                    "assistant",
+                                    text_content,
+                                    scene=current_scene,
+                                    window_title=active_window_title,
+                                )
                             self._remember_auto_reply_state(
                                 task_id,
                                 active_window_title=active_window_title,
@@ -2627,15 +2763,11 @@ class ScreenCompanionMediaMixin:
         if self.use_companion_mode:
             companion_supplemental_guide = (
                 "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
-                "你可以偶尔轻轻表达自己也想和用户一起看点内容、玩一局游戏或做个小测试，"
-                "但必须低频、自然，不要打断正事，更不能凭空捏造共同经历。"
+                "你的目标首先是通过上下文和必要的观察，知道用户现在在做什么、做到哪一步、状态大概怎样，"
+                "然后像正常聊天一样顺着回应，而不是反复强调自己看到了什么。"
+                "除非用户明确在问你看到了什么，或者这个观察本身就是回答问题所必需的，"
+                "否则不要把回复写成“我看到你在……”“屏幕上是……”这种观察播报。"
             )
-            if stealth_watch_mode:
-                companion_supplemental_guide += (
-                    "当前同时开启了偷看模式：更像一个悄悄关注状态变化的贴身伙伴。"
-                    "尽量少说“我看到你”“我一直在看”，更适合用低打扰、顺手接话的方式表达观察。"
-                    "在有帮助时可以参考用户最近的电脑使用轨迹，但不要把回复写成监控播报。"
-                )
             effective_prompt = (
                 companion_prompt or base_prompt or config_prompt or DEFAULT_SYSTEM_PROMPT
             )
@@ -2650,13 +2782,15 @@ class ScreenCompanionMediaMixin:
         supplemental_guide = (
             "\n\n额外要求：少用旁白式开场，不要总是先叫用户名字。"
             "如果能提出建议，优先给和当前任务直接相关、能立刻用上的建议。"
+            "你可以利用观察来理解用户在做什么，但默认要把观察内化成回应，"
+            "不要一上来先交代自己看到了什么。"
             "可以偶尔表达自己也想和用户一起做点什么，但只限轻松自然的一句，"
             "并且任何共同经历都只能基于当前对话或已记录内容，不能虚构。"
         )
         if stealth_watch_mode:
             supplemental_guide += (
                 "当前开启了偷看模式：减少直白的窥视感，避免频繁说“我看到你正在……”。"
-                "更像是悄悄留意到一点状态变化后，顺手低声说一句。"
+                "更像是悄悄留意到一点行为或状态变化后，顺手低声说一句。"
             )
 
         return f"{base_prompt.rstrip()}{supplemental_guide}"
@@ -3361,10 +3495,9 @@ class ScreenCompanionMediaMixin:
         scene: str = "",
         active_window_title: str = "",
     ) -> str:
-        """调用外部视觉 API 进行图像分析。"""
+        """调用外部视觉链路进行图像分析，优先使用 AstrBot 视觉 provider。"""
         import aiohttp
 
-        # 构建请求数据
         base64_data = base64.b64encode(media_bytes).decode("utf-8")
         image_prompt = self._build_vision_prompt(scene, active_window_title)
         if media_kind == "video":
@@ -3372,6 +3505,55 @@ class ScreenCompanionMediaMixin:
                 "以下为用户当前桌面录屏视频（最近约10秒），你可以参考此内容判断用户正在做什么、进行到哪一步、画面里的关键线索或异常，并给出最值得的一条建议。\n"
                 f"{image_prompt}"
             )
+        error = "未配置视觉识别链路"
+
+        async def call_provider(provider_id: str) -> tuple[str | None, str | None]:
+            provider_id = str(provider_id or "").strip()
+            if not provider_id:
+                return None, "未配置视觉 provider"
+
+            getter = getattr(self.context, "get_provider_by_id", None)
+            if not callable(getter):
+                return None, "当前 AstrBot context 不支持按 ID 获取 provider"
+
+            provider = None
+            try:
+                provider = getter(provider_id)
+            except Exception as e:
+                logger.warning(f"获取视觉 provider 失败 {provider_id}: {e}")
+                return None, "读取视觉 provider 失败"
+
+            if not provider:
+                logger.warning(f"找不到 AstrBot 视觉 provider: {provider_id}")
+                return None, "未找到视觉 provider"
+
+            try:
+                response = await asyncio.wait_for(
+                    self._call_provider_multimodal_direct(
+                        provider=provider,
+                        interaction_prompt=image_prompt,
+                        system_prompt="",
+                        media_bytes=media_bytes,
+                        media_kind=media_kind,
+                        mime_type=mime_type,
+                        provider_id=provider_id,
+                    ),
+                    timeout=self._get_interaction_timeout(media_kind, True),
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"AstrBot 视觉 provider 超时: {provider_id}")
+                return None, "视觉 provider 响应超时"
+            except Exception as e:
+                logger.warning(f"AstrBot 视觉 provider 调用失败({provider_id}): {e}")
+                return None, "视觉 provider 调用失败"
+
+            completion_text = str(
+                getattr(response, "completion_text", "") or getattr(response, "text", "") or ""
+            ).strip()
+            if completion_text:
+                logger.info(f"已使用 AstrBot 视觉 provider 识屏: {provider_id}")
+                return completion_text, None
+            return None, "视觉 provider 返回为空"
 
         # 定义API调用函数
         async def call_api(api_url, api_key, api_model):
@@ -3453,30 +3635,45 @@ class ScreenCompanionMediaMixin:
                     else:
                         return None, "这次视觉分析没有成功，再给我一次机会。"
 
-        # 获取主API配置
+        primary_provider_id = str(getattr(self, "vision_provider_id", "") or "").strip()
+        backup_provider_id = str(
+            getattr(self, "vision_provider_id_backup", "") or ""
+        ).strip()
+
+        if primary_provider_id:
+            logger.info("尝试使用主 AstrBot 视觉 provider")
+            result, error = await call_provider(primary_provider_id)
+            if result:
+                return result
+
+        if backup_provider_id:
+            logger.info("主 AstrBot 视觉 provider 失败，尝试使用备用 provider")
+            result, error = await call_provider(backup_provider_id)
+            if result:
+                return result
+
+        # 兼容旧版独立视觉 API 配置
         main_api_url = self.vision_api_url
         main_api_key = self.vision_api_key
         main_api_model = self.vision_api_model
 
-        # 首先尝试主API
-        logger.info("尝试使用主视觉API")
-        result, error = await call_api(main_api_url, main_api_key, main_api_model)
-        if result:
-            return result
+        if main_api_url:
+            logger.info("未命中视觉 provider，回退到旧版主视觉 API 配置")
+            result, error = await call_api(main_api_url, main_api_key, main_api_model)
+            if result:
+                return result
 
-        # 主API失败，尝试备用API
-        backup_api_url = getattr(self, 'vision_api_url_backup', None)
-        backup_api_key = getattr(self, 'vision_api_key_backup', None)
-        backup_api_model = getattr(self, 'vision_api_model_backup', None)
+        backup_api_url = getattr(self, "vision_api_url_backup", None)
+        backup_api_key = getattr(self, "vision_api_key_backup", None)
+        backup_api_model = getattr(self, "vision_api_model_backup", None)
 
         if backup_api_url:
-            logger.info("主视觉API失败，尝试使用备用视觉API")
+            logger.info("主视觉链路失败，尝试使用旧版备用视觉 API 配置")
             result, error = await call_api(backup_api_url, backup_api_key, backup_api_model)
             if result:
                 return result
 
-        # 所有API都失败
-        logger.error("所有视觉API调用都失败了")
+        logger.error("所有视觉链路都失败了")
         return error if error else "视觉分析服务暂时不可用，请稍后再试。"
 
     @staticmethod
@@ -4125,6 +4322,11 @@ class ScreenCompanionMediaMixin:
                 str(getattr(event, "unified_msg_origin", "") or ""),
                 screen_result,
             )
+            self._remember_recent_companion_message(
+                str(getattr(event, "unified_msg_origin", "") or ""),
+                "assistant",
+                screen_result,
+            )
         except Exception as e:
             if debug_mode:
                 logger.debug(f"[{task_id}] 记录最近助手回复失败: {e}")
@@ -4565,10 +4767,6 @@ class ScreenCompanionMediaMixin:
     ) -> list[str]:
         contexts: list[str] = []
         try:
-            if not hasattr(self.context, "conversation_manager"):
-                return contexts
-
-            conv_mgr = self.context.conversation_manager
             uid = ""
             try:
                 uid = session.unified_msg_origin if session else ""
@@ -4579,20 +4777,35 @@ class ScreenCompanionMediaMixin:
             if not uid:
                 return contexts
 
-            try:
-                curr_cid = await conv_mgr.get_curr_conversation_id(uid)
-                if curr_cid:
-                    conversation = await conv_mgr.get_conversation(uid, curr_cid)
-                    if conversation and conversation.history:
-                        for msg in conversation.history[-8:]:
-                            if msg.get("role") in {"user", "assistant"}:
-                                content = str(msg.get("content", "") or "").strip()
-                                if content:
-                                    role = "用户" if msg.get("role") == "user" else "助手"
-                                    contexts.append(f"{role}: {content}")
-            except Exception as e:
-                if debug_mode:
-                    logger.debug(f"读取对话上下文失败: {e}")
+            conv_mgr = getattr(self.context, "conversation_manager", None)
+            if conv_mgr is not None:
+                try:
+                    curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+                    if curr_cid:
+                        conversation = await conv_mgr.get_conversation(uid, curr_cid)
+                        if conversation and conversation.history:
+                            for msg in conversation.history[-8:]:
+                                if msg.get("role") in {"user", "assistant"}:
+                                    content = str(msg.get("content", "") or "").strip()
+                                    if content:
+                                        role = "用户" if msg.get("role") == "user" else "助手"
+                                        contexts.append(f"{role}: {content}")
+                except Exception as e:
+                    if debug_mode:
+                        logger.debug(f"读取对话上下文失败: {e}")
+
+            runtime_contexts = self._get_recent_companion_message_context(uid, limit=6)
+            if runtime_contexts:
+                existing = set(contexts)
+                for line in runtime_contexts:
+                    if line not in existing:
+                        contexts.append(line)
+                        existing.add(line)
+
+            if not contexts:
+                recent_trace_lines = self._collect_recent_start_end_context(limit=3)
+                if recent_trace_lines:
+                    contexts.extend(f"助手: {line}" for line in recent_trace_lines)
         except Exception as e:
             if debug_mode:
                 logger.debug(f"收集上下文失败: {e}")
@@ -4963,9 +5176,13 @@ class ScreenCompanionMediaMixin:
             if effective_use_external_vision:
                 prompt_parts.extend(
                     [
-                        "你是屏幕伴侣，请结合下面的识屏结果与对话上下文，自然地继续陪伴用户。",
+                        "你是屏幕伴侣。识屏结果只是你的内部观察依据，不是必须转述给用户的播报稿。",
+                        "请结合下面的识屏结果与对话上下文，自然地继续陪伴用户。",
                         f"当前场景：{scene}",
                         f"识别结果：{recognition_text or '未获得有效识别结果。'}",
+                        "请先内化这些观察，再像聊天一样直接回应用户。",
+                        "除非用户明确在问你看到了什么，或者不说这个观察就无法回答，否则不要先复述屏幕内容。",
+                        "尤其不要用“你在……啊”“现在在……呢”“屏幕上是……”这种先描述画面、再补一句评价的句式。",
                         "请优先判断用户正在做什么、可能卡在哪一步，以及现在最值得提醒的一条建议。",
                     ]
                 )
@@ -4976,6 +5193,9 @@ class ScreenCompanionMediaMixin:
                         f"当前场景：{scene}",
                         f"素材类型：{media_kind}",
                         "请只基于当前素材与已有上下文做判断；如果看不清或信息不足，要明确说明不确定。",
+                        "这些观察默认只用于帮助你理解用户在做什么，不要把回复写成先汇报观察、再补一句反应的结构。",
+                        "除非用户明确在问你看到了什么，或者不说这个观察就无法回答，否则直接根据理解做出反应。",
+                        "尤其不要写成“你在……啊”“现在在……呢”“屏幕上是……”这种客观旁白式开头。",
                         "请优先关注用户正在做什么、进行到哪一步，以及此刻最值得提醒的一条建议。",
                     ]
                 )
@@ -4985,6 +5205,7 @@ class ScreenCompanionMediaMixin:
                 prompt_parts.append(
                     "连续性要求：把这条消息视作同一段持续陪伴的延续，优先补充新的变化、判断或下一步；"
                     "不要每条都重新用情绪化称呼开场，也不要重复上一条已经说过的提醒。"
+                    "如果没有明显新变化，宁可少说，也不要改写成另一句画面播报。"
                 )
             analysis_trace["memory_hints"] = []
             analysis_trace["preference_hints"] = []
@@ -5043,19 +5264,6 @@ class ScreenCompanionMediaMixin:
                     context_count=len(contexts),
                 )
             )
-            if social_chat_context.get("guidance"):
-                prompt_parts.append(
-                    "私聊语境：\n" + str(social_chat_context.get("guidance", "")).strip()
-                )
-            if social_chat_context.get("last_user"):
-                prompt_parts.append(
-                    f"上一条用户语气参考：{social_chat_context.get('last_user')}"
-                )
-            if social_chat_context.get("last_assistant"):
-                prompt_parts.append(
-                    "上一条助手语气参考："
-                    + str(social_chat_context.get("last_assistant", "")).strip()
-                )
 
             latest_window_title = self._normalize_window_title(
                 capture_context.get("latest_window_title", "")
@@ -5107,7 +5315,7 @@ class ScreenCompanionMediaMixin:
                 logger.error("LLM 响应超时")
                 analysis_trace["status"] = "timeout"
                 capture_context["_analysis_trace"] = analysis_trace
-                return [Plain("这次识屏响应超时了，请稍后再试。")]
+                return [Plain("这会儿我有点没看清呢……你可以稍后再让我看看。")]
 
             response_text = "我看过了，但这一轮还没成功生成回复。"
             if (
@@ -5176,17 +5384,17 @@ class ScreenCompanionMediaMixin:
             logger.error(f"识屏分析失败: {e}")
             error_msg = str(e).lower()
             error_type = "unknown"
-            error_text = "这次识屏分析失败了，请稍后再试。"
+            error_text = "这下我有点没看清呢……你可以稍后再让我看看。"
 
             if "timeout" in error_msg:
                 error_type = "timeout"
-                error_text = "这次识屏请求超时了，请稍后再试。"
+                error_text = "我刚刚看得有点慢了呢……你可以稍后再让我看看。"
             elif "api" in error_msg:
                 error_type = "api"
-                error_text = "外部接口调用失败了，请检查配置或稍后再试。"
+                error_text = "这会儿我还没顺利看清呢……你可以稍后再让我看看。"
             elif "vision" in error_msg or "video" in error_msg:
                 error_type = "vision"
-                error_text = "当前模型暂时不支持这次多模态识别，请检查视觉配置。"
+                error_text = "这次我还看不太清这个画面呢……你可以换个方式再让我看看。"
 
             analysis_trace["status"] = f"error:{error_type}"
             analysis_trace["reply_preview"] = error_text
