@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "3.0.0"
+    APP_VERSION = "3.1.0"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -572,6 +572,7 @@ class WebServer:
             if os.path.exists(diary_path):
                 with open(diary_path, 'r', encoding='utf-8') as f:
                     content = f.read()
+                content = self._normalize_diary_break_tags(content)
             try:
                 target_date = datetime.strptime(date, "%Y-%m-%d").date()
             except Exception:
@@ -605,6 +606,14 @@ class WebServer:
             except Exception as e:
                 logger.debug(f"读取日记摘要路径失败，已回退默认路径: {e}")
         return Path(self.data_dir) / f"diary_{target_date.strftime('%Y%m%d')}.summary.json"
+
+    @staticmethod
+    def _normalize_diary_break_tags(content: str) -> str:
+        text = str(content or "")
+        text = re.sub(r"&lt;\s*br\s*/?\s*&gt;", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"[〈＜]\s*br\s*/?\s*[〉＞]", "\n", text, flags=re.IGNORECASE)
+        return re.sub(r"\n{3,}", "\n\n", text)
 
     def _drop_diary_metadata(self, date_str: str) -> bool:
         metadata = getattr(self.plugin, "diary_metadata", None)
@@ -2939,6 +2948,7 @@ class WebServer:
                     "weather_city",
                     "admin_qq",
                     "proactive_target",
+                    "enable_proactive_decorating_hooks",
                     "custom_tasks",
                     "debug",
                 ],
@@ -3679,6 +3689,16 @@ class WebServer:
                 "window_total_inputs_label": "0 次",
                 "window_active_minutes": 0,
                 "window_active_minutes_label": "0 分钟",
+                "all_total_inputs": 0,
+                "all_total_inputs_label": "0 次",
+                "all_active_minutes": 0,
+                "all_active_minutes_label": "0 分钟",
+                "all_days_count": 0,
+                "all_days_count_label": "0 天",
+                "all_active_days": 0,
+                "all_active_days_label": "0 天",
+                "retention_days": 0,
+                "retention_days_label": "永久",
             },
             days=self.ACTIVITY_TREND_DAYS,
         ) or {}

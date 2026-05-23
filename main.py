@@ -419,6 +419,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
         # WebUI 相关
         self.web_server = None
+        self.page_api = None
+        self._register_plugin_page_api_if_available()
         self._ensure_webui_password()
 
         # 长期记忆系统
@@ -476,11 +478,6 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             task = asyncio.create_task(self._diary_task())
             self.background_tasks.append(task)
 
-        # 启动 Web UI（如果启用）
-        if self.webui_enabled:
-            task = asyncio.create_task(self._start_webui())
-            self.background_tasks.append(task)
-
         task = asyncio.create_task(self._custom_tasks_task())
         self.background_tasks.append(task)
 
@@ -511,6 +508,24 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         if _screen_companion_tool_plugin is self:
             _screen_companion_tool_plugin = None
         await self.stop()
+
+    def _register_plugin_page_api_if_available(self) -> None:
+        """注册 AstrBot 插件拓展页面 API。"""
+        if not hasattr(self.context, "register_web_api"):
+            return
+
+        try:
+            from .page_api import PluginPageApi
+        except Exception as e:
+            logger.warning(f"插件拓展页面 API 不可用，已跳过注册: {e}", exc_info=True)
+            return
+
+        try:
+            self.page_api = PluginPageApi(self)
+            self.page_api.register(self.context)
+        except Exception as e:
+            self.page_api = None
+            logger.warning(f"插件拓展页面 API 注册失败，已跳过: {e}", exc_info=True)
 
     @staticmethod
     def _coerce_bool(value: Any) -> bool:
@@ -882,6 +897,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.battery_threshold = self.plugin_config.battery_threshold
         self.admin_qq = self.plugin_config.admin_qq
         self.proactive_target = self.plugin_config.proactive_target
+        self.enable_proactive_decorating_hooks = self._coerce_bool(
+            getattr(self.plugin_config, "enable_proactive_decorating_hooks", True)
+        )
         self.save_local = self._coerce_bool(self.plugin_config.save_local)
         self.enable_natural_language_screen_assist = (
             self._coerce_bool(self.plugin_config.enable_natural_language_screen_assist)
@@ -1048,7 +1066,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 "诊断维护：",
                 "- /kpi status 查看运行状态和最近学习动态",
                 "- /kpi list 查看当前运行中的任务",
-                "- /kpi webui start 启动 WebUI",
+                "- /kpi webui 查看插件拓展页面状态",
+                "- /kpi webui start 手动启动兼容独立 WebUI",
                 "- /kpi ffmpeg 查看或设置 ffmpeg",
                 "",
                 "小提示：",
@@ -2315,17 +2334,17 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             return
         if action_text == "start":
             if self.web_server:
-                yield event.plain_result("WebUI 已经在运行中。")
+                yield event.plain_result("兼容独立 WebUI 已经在运行中。")
             else:
                 await self._start_webui()
-                yield event.plain_result(f"WebUI 已启动，访问地址: http://127.0.0.1:{self.webui_port}")
+                yield event.plain_result(f"兼容独立 WebUI 已启动，访问地址: http://127.0.0.1:{self.webui_port}")
         elif action_text == "stop":
             if not self.web_server:
-                yield event.plain_result("WebUI 当前没有运行。")
+                yield event.plain_result("兼容独立 WebUI 当前没有运行。")
             else:
                 await self._stop_webui()
                 self.web_server = None
-                yield event.plain_result("WebUI 已停止。")
+                yield event.plain_result("兼容独立 WebUI 已停止。")
         else:
             yield event.plain_result("无效操作，请使用 /kpi webui start 或 /kpi webui stop")
 

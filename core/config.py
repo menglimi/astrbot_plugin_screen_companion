@@ -106,6 +106,7 @@ class PluginConfig(BaseModel):
     battery_threshold: int = 20
     admin_qq: str = ""
     proactive_target: str = ""
+    enable_proactive_decorating_hooks: bool = True
     save_local: bool = True
     enable_natural_language_screen_assist: bool = False
     screen_skill_prompt: str = ""  # 内置识屏技能提示词，留空时使用默认约束

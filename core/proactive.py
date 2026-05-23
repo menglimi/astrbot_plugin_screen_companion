@@ -7,8 +7,12 @@ import time
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import MessageChain
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import BaseMessageComponent, Plain
+from astrbot.core.message.message_event_result import MessageEventResult
+from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.star.star_handler import EventType, star_handlers_registry
 
 from ..web_server import WebServer
 
@@ -272,12 +276,111 @@ class ScreenCompanionProactiveMixin:
         event.config = self.plugin_config
         return event
 
+    def _get_platform_for_proactive_target(self, target: str) -> Any:
+        parts = str(target or "").split(":", 2)
+        if len(parts) != 3:
+            return None
+        platform_token = parts[0]
+        for platform in self._get_available_platforms():
+            try:
+                meta = platform.meta()
+                platform_id = str(getattr(meta, "id", "") or "").strip()
+                platform_name = str(getattr(meta, "name", "") or "").strip()
+            except Exception:
+                continue
+            if platform_token in {platform_id, platform_name}:
+                return platform
+        return None
+
+    def _build_proactive_result_from_chain(self, chain: MessageChain) -> MessageEventResult:
+        result = MessageEventResult()
+        result.chain = list(getattr(chain, "chain", []) or [])
+        return result
+
+    def _message_type_for_proactive_target(self, target: str) -> MessageType:
+        parts = str(target or "").split(":", 2)
+        message_type = parts[1] if len(parts) == 3 else ""
+        if "Group" in message_type:
+            return MessageType.GROUP_MESSAGE
+        return MessageType.FRIEND_MESSAGE
+
+    async def _trigger_proactive_decorating_hooks(
+        self, target: str, message_chain: MessageChain
+    ) -> MessageChain:
+        """Allow decorators to rewrite proactive messages before sending."""
+        if not bool(getattr(self, "enable_proactive_decorating_hooks", True)):
+            return message_chain
+
+        components = list(getattr(message_chain, "chain", []) or [])
+        if not components:
+            return message_chain
+
+        target = self._normalize_target(target)
+        parts = target.split(":", 2)
+        if len(parts) != 3:
+            return message_chain
+
+        platform = self._get_platform_for_proactive_target(target)
+        if platform is None:
+            return message_chain
+
+        _, message_type_text, session_id = parts
+        try:
+            message_obj = AstrBotMessage()
+            message_obj.type = self._message_type_for_proactive_target(target)
+            if "Group" in message_type_text:
+                message_obj.group = Group(group_id=session_id)
+            message_obj.session_id = session_id
+            message_obj.self_id = session_id
+            message_obj.message_id = f"screen_companion_proactive_{int(time.time() * 1000)}"
+            message_obj.sender = MessageMember(user_id=session_id)
+            message_obj.message = components
+            message_obj.message_str = ""
+            message_obj.raw_message = None
+            message_obj.timestamp = int(time.time())
+
+            event = AstrMessageEvent("", message_obj, platform.meta(), session_id)
+            event.set_result(self._build_proactive_result_from_chain(message_chain))
+        except Exception as e:
+            logger.debug(f"构造主动消息装饰事件失败，已跳过 hooks: {e}")
+            return message_chain
+
+        try:
+            handlers = star_handlers_registry.get_handlers_by_event_type(
+                EventType.OnDecoratingResultEvent
+            )
+        except Exception as e:
+            logger.debug(f"获取主动消息装饰 hooks 失败，已跳过: {e}")
+            return message_chain
+
+        for handler in handlers:
+            try:
+                await handler.handler(event)
+            except Exception as e:
+                logger.warning(
+                    "主动消息装饰 hook 执行失败: %s: %s",
+                    getattr(handler, "handler_full_name", "unknown"),
+                    e,
+                )
+
+        result = event.get_result()
+        processed = getattr(result, "chain", None) if result is not None else None
+        if processed is None:
+            return message_chain
+        return MessageChain(list(processed or []))
+
     async def _send_proactive_message(
         self, target: str, message_chain: MessageChain
     ) -> bool:
         """Send a proactive message via the resolved platform instance."""
         target = self._normalize_target(target)
         if not target:
+            return False
+
+        message_chain = await self._trigger_proactive_decorating_hooks(
+            target, message_chain
+        )
+        if not getattr(message_chain, "chain", None):
             return False
 
         session = None
@@ -890,6 +993,9 @@ class ScreenCompanionProactiveMixin:
             old_server_active = bool(
                 old_server and getattr(old_server, "_started", False)
             )
+            if not old_server_active:
+                logger.info("独立 WebUI 未运行，配置变更仅更新插件拓展页面 API。")
+                return
             self.web_server = None
 
             try:

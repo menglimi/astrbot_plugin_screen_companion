@@ -622,6 +622,15 @@
       "enabled": true
     }
   },
+  "enable_proactive_decorating_hooks": {
+    "description": "主动消息触发装饰钩子",
+    "type": "bool",
+    "hint": "开启后，主动消息发送前会触发 OnDecoratingResultEvent，允许其它插件继续装饰或改写消息链。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
   "save_local": {
     "description": "是否在本地保留最近一次识别素材",
     "type": "bool",

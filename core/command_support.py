@@ -15,57 +15,22 @@ class ScreenCompanionCommandSupportMixin:
     async def _render_webui_status(self, event: AstrMessageEvent):
         """查看 WebUI 信息。"""
         self._ensure_runtime_state()
-        if self.webui_enabled:
-            # 检查 WebUI 服务是否正在运行
-            webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
-            
-            if webui_running:
-                # 获取实际使用的端口
-                actual_port = getattr(self.web_server, "port", self.webui_port)
-                host = self.webui_host
-                if host == "0.0.0.0":
-                    access_url = f"http://127.0.0.1:{actual_port}"
-                else:
-                    access_url = f"http://{host}:{actual_port}"
-                
-                auth_status = "已启用" if self.webui_auth_enabled else "未启用"
-                password = self.webui_password or "（未设置，首次访问时会自动生成）"
-                
-                response = f"WebUI 状态：已启用\n"
-                response += f"访问地址：{access_url}\n"
-                response += f"认证状态：{auth_status}\n"
-                response += f"访问密码：{password}\n"
-                response += f"会话超时：{self.webui_session_timeout} 秒"
-            else:
-                # WebUI 已启用但服务未运行，尝试启动
-                try:
-                    await self._start_webui()
-                    # 再次检查状态
-                    webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
-                    if webui_running:
-                        actual_port = getattr(self.web_server, "port", self.webui_port)
-                        host = self.webui_host
-                        if host == "0.0.0.0":
-                            access_url = f"http://127.0.0.1:{actual_port}"
-                        else:
-                            access_url = f"http://{host}:{actual_port}"
-                        
-                        auth_status = "已启用" if self.webui_auth_enabled else "未启用"
-                        password = self.webui_password or "（未设置，首次访问时会自动生成）"
-                        
-                        response = f"WebUI 状态：已启用\n"
-                        response += f"访问地址：{access_url}\n"
-                        response += f"认证状态：{auth_status}\n"
-                        response += f"访问密码：{password}\n"
-                        response += f"会话超时：{self.webui_session_timeout} 秒"
-                    else:
-                        response = f"WebUI 已启用但启动失败，请检查配置和端口占用情况。\n"
-                        response += f"配置的端口：{self.webui_port}\n"
-                        response += f"配置的地址：{self.webui_host}"
-                except Exception as e:
-                    response = f"WebUI 已启用但启动失败：{str(e)}"
+        page_api_ready = bool(getattr(self, "page_api", None))
+        webui_running = self.web_server is not None and getattr(self.web_server, "_started", False)
+        response = "WebUI 状态：已迁移至 AstrBot 插件拓展页面\n"
+        response += "入口：AstrBot 控制台 -> 插件管理 -> 屏幕伴侣 -> 屏幕伴侣\n"
+        response += f"拓展页面 API：{'已注册' if page_api_ready else '未注册'}"
+
+        if webui_running:
+            actual_port = getattr(self.web_server, "port", self.webui_port)
+            host = self.webui_host
+            access_url = f"http://127.0.0.1:{actual_port}" if host == "0.0.0.0" else f"http://{host}:{actual_port}"
+            auth_status = "已启用" if self.webui_auth_enabled else "未启用"
+            response += "\n\n兼容独立 WebUI：运行中"
+            response += f"\n访问地址：{access_url}"
+            response += f"\n认证状态：{auth_status}"
         else:
-            response = "WebUI 未启用，请在配置中开启。"
+            response += "\n\n兼容独立 WebUI：未运行。需要旧端口入口时可用 /kpi webui start 手动启动。"
         
         yield event.plain_result(response)
 

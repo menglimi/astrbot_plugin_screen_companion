@@ -15,7 +15,7 @@ from astrbot.api import logger
 
 
 class ScreenCompanionInputStatsMixin:
-    INPUT_STATS_RETENTION_DAYS = 14
+    INPUT_STATS_RETENTION_DAYS = 0
     INPUT_MOVE_SAMPLE_INTERVAL_SECONDS = 0.25
     INPUT_MOVE_MIN_PIXELS = 12
     INPUT_IDLE_THRESHOLD_SECONDS = 5 * 60
@@ -65,6 +65,8 @@ class ScreenCompanionInputStatsMixin:
         }
 
     def _prune_input_stats_history(self) -> None:
+        if int(self.INPUT_STATS_RETENTION_DAYS or 0) <= 0:
+            return
         retention_days = max(1, int(self.INPUT_STATS_RETENTION_DAYS))
         cutoff_date = datetime.now().date() - timedelta(days=retention_days - 1)
         removable_keys = []
@@ -572,16 +574,30 @@ class ScreenCompanionInputStatsMixin:
             self._summarize_input_stats_entry(day_key, raw_daily.get(day_key))
             for day_key in day_keys
         ]
+        all_days = [
+            self._summarize_input_stats_entry(day_key, raw_daily.get(day_key))
+            for day_key in sorted(raw_daily.keys())
+        ]
         today_summary = recent_days[-1] if recent_days else self._summarize_input_stats_entry(today.strftime("%Y-%m-%d"), {})
         total_inputs = sum(int(item.get("total_inputs", 0) or 0) for item in recent_days)
         total_active_minutes = sum(int(item.get("active_minutes", 0) or 0) for item in recent_days)
-        has_any_data = any(
+        all_total_inputs = sum(int(item.get("total_inputs", 0) or 0) for item in all_days)
+        all_active_minutes = sum(int(item.get("active_minutes", 0) or 0) for item in all_days)
+        all_active_days = sum(
+            1
+            for item in all_days
+            if int(item.get("total_inputs", 0) or 0) > 0
+            or int(item.get("move_pixels", 0) or 0) > 0
+        )
+        window_has_data = any(
             int(item.get("total_inputs", 0) or 0) > 0
             or int(item.get("move_pixels", 0) or 0) > 0
             for item in recent_days
         )
+        has_any_data = window_has_data or all_active_days > 0
         latest_event_at = ""
-        for item in reversed(recent_days):
+        event_days = all_days if all_days else recent_days
+        for item in reversed(event_days):
             candidate = str(item.get("last_event_at", "") or "").strip()
             if candidate:
                 latest_event_at = candidate
@@ -599,6 +615,20 @@ class ScreenCompanionInputStatsMixin:
             "window_total_inputs_label": self._format_count(total_inputs, " 次"),
             "window_active_minutes": total_active_minutes,
             "window_active_minutes_label": self._format_count(total_active_minutes, " 分钟"),
+            "all_total_inputs": all_total_inputs,
+            "all_total_inputs_label": self._format_count(all_total_inputs, " 次"),
+            "all_active_minutes": all_active_minutes,
+            "all_active_minutes_label": self._format_count(all_active_minutes, " 分钟"),
+            "all_days_count": len(all_days),
+            "all_days_count_label": self._format_count(len(all_days), " 天"),
+            "all_active_days": all_active_days,
+            "all_active_days_label": self._format_count(all_active_days, " 天"),
+            "retention_days": int(self.INPUT_STATS_RETENTION_DAYS),
+            "retention_days_label": (
+                "永久"
+                if int(self.INPUT_STATS_RETENTION_DAYS or 0) <= 0
+                else self._format_count(int(self.INPUT_STATS_RETENTION_DAYS), " 天")
+            ),
             "latest_event_at": latest_event_at,
             **presence,
         }

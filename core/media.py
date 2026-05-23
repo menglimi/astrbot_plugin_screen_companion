@@ -23,6 +23,126 @@ from ..web_server import WebServer
 from .app_descriptions import describe_window_activity, infer_scene_from_window_title
 
 class ScreenCompanionMediaMixin:
+    def _guess_screen_material_extension(
+        self,
+        media_kind: str = "image",
+        mime_type: str = "",
+    ) -> str:
+        normalized_kind = str(media_kind or "image").strip().lower()
+        normalized_mime = str(mime_type or "").strip().lower()
+        if normalized_kind == "video":
+            if "webm" in normalized_mime:
+                return ".webm"
+            if "quicktime" in normalized_mime or "mov" in normalized_mime:
+                return ".mov"
+            return ".mp4"
+        if "png" in normalized_mime:
+            return ".png"
+        if "webp" in normalized_mime:
+            return ".webp"
+        return ".jpg"
+
+    def _save_latest_screen_material_snapshot(
+        self,
+        base_name: str,
+        media_bytes: bytes,
+        *,
+        media_kind: str = "image",
+        mime_type: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        if not self.save_local or not media_bytes:
+            return ""
+        try:
+            data_dir = self.plugin_config.data_dir
+            data_dir.mkdir(parents=True, exist_ok=True)
+            ext = self._guess_screen_material_extension(
+                media_kind=media_kind,
+                mime_type=mime_type,
+            )
+            material_path = data_dir / f"{base_name}{ext}"
+            with open(material_path, "wb") as f:
+                f.write(media_bytes)
+            if metadata is not None:
+                metadata_path = data_dir / f"{base_name}_meta.json"
+                with open(metadata_path, "w", encoding="utf-8") as f:
+                    json.dump(metadata, f, ensure_ascii=False, indent=2)
+            return str(material_path)
+        except Exception as e:
+            logger.error(f"保存识屏调试素材失败({base_name}): {e}")
+            return ""
+
+    def _build_screen_material_debug_metadata(
+        self,
+        *,
+        task_id: str = "",
+        stage: str = "",
+        capture_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        context = capture_context or {}
+        media_bytes = context.get("media_bytes", b"") or b""
+        metadata: dict[str, Any] = {
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "task_id": str(task_id or ""),
+            "stage": str(stage or ""),
+            "media_kind": str(context.get("media_kind", "image") or "image"),
+            "mime_type": str(context.get("mime_type", "") or ""),
+            "size_bytes": len(media_bytes) if isinstance(media_bytes, (bytes, bytearray)) else 0,
+            "active_window_title": str(context.get("active_window_title", "") or ""),
+            "clip_active_window_title": str(context.get("clip_active_window_title", "") or ""),
+            "latest_window_title": str(context.get("latest_window_title", "") or ""),
+            "source_label": str(context.get("source_label", "") or ""),
+            "trigger_reason": str(context.get("trigger_reason", "") or ""),
+        }
+        duration_seconds = context.get("duration_seconds")
+        if duration_seconds:
+            metadata["duration_seconds"] = int(duration_seconds)
+        return metadata
+
+    def _save_screen_capture_debug_files(
+        self,
+        capture_context: dict[str, Any],
+        *,
+        task_id: str = "",
+        stage: str = "capture",
+    ) -> list[str]:
+        if not self.save_local or not isinstance(capture_context, dict):
+            return []
+        saved_paths: list[str] = []
+        metadata = self._build_screen_material_debug_metadata(
+            task_id=task_id,
+            stage=stage,
+            capture_context=capture_context,
+        )
+        material_path = self._save_latest_screen_material_snapshot(
+            f"screen_peek_{stage}_latest",
+            capture_context.get("media_bytes", b"") or b"",
+            media_kind=str(capture_context.get("media_kind", "image") or "image"),
+            mime_type=str(capture_context.get("mime_type", "") or ""),
+            metadata=metadata,
+        )
+        if material_path:
+            saved_paths.append(material_path)
+        latest_image_bytes = capture_context.get("latest_image_bytes", b"") or b""
+        if latest_image_bytes:
+            anchor_path = self._save_latest_screen_material_snapshot(
+                f"screen_peek_{stage}_anchor_latest",
+                latest_image_bytes,
+                media_kind="image",
+                mime_type="image/jpeg",
+                metadata={
+                    "saved_at": metadata["saved_at"],
+                    "task_id": metadata["task_id"],
+                    "stage": stage,
+                    "kind": "latest_anchor_frame",
+                    "latest_window_title": metadata.get("latest_window_title", ""),
+                    "active_window_title": metadata.get("active_window_title", ""),
+                },
+            )
+            if anchor_path:
+                saved_paths.append(anchor_path)
+        return saved_paths
+
     def _parse_user_preferences(self):
         """解析用户偏好设置。"""
         self.parsed_preferences = {}
@@ -4285,10 +4405,18 @@ class ScreenCompanionMediaMixin:
         media_bytes = capture_context["media_bytes"]
         media_kind = str(capture_context.get("media_kind", "image") or "image")
         active_window_title = capture_context.get("active_window_title", "")
+        saved_capture_paths = self._save_screen_capture_debug_files(
+            capture_context,
+            task_id=task_id,
+            stage="capture",
+        )
         if debug_mode:
             logger.info(
                 f"[{task_id}] 识屏素材已准备，模式: {media_kind}, 大小: {len(media_bytes)} bytes, 活动窗口: {active_window_title}"
             )
+
+        if debug_mode and saved_capture_paths:
+            logger.info(f"[{task_id}] 最新识屏抓取素材已保存: {' | '.join(saved_capture_paths)}")
 
         effective_analysis_timeout = (
             float(analysis_timeout)
@@ -5058,6 +5186,19 @@ class ScreenCompanionMediaMixin:
                         analysis_trace["used_full_video"] = False
                         if use_external_vision:
                             recognition_capture_context = sampled_capture_context
+
+            saved_recognition_paths = self._save_screen_capture_debug_files(
+                recognition_capture_context,
+                task_id=task_id,
+                stage="recognition",
+            )
+            if debug_mode and saved_recognition_paths:
+                logger.info(
+                    "[{}] 最新识屏识别素材已保存: {}".format(
+                        task_id,
+                        " | ".join(saved_recognition_paths),
+                    )
+                )
 
             recognition_result = await self._recognize_screen_material(
                 capture_context=recognition_capture_context,

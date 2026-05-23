@@ -942,7 +942,12 @@ class ScreenCompanionMemoryMixin:
         """清理日记段落中的重复标题和无效空行。"""
         import re
 
-        lines = str(text or "").replace("\r\n", "\n").split("\n")
+        normalized_text = str(text or "")
+        normalized_text = re.sub(r"&lt;\s*br\s*/?\s*&gt;", "\n", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"<\s*br\s*/?\s*>", "\n", normalized_text, flags=re.IGNORECASE)
+        normalized_text = re.sub(r"[〈＜]\s*br\s*/?\s*[〉＞]", "\n", normalized_text, flags=re.IGNORECASE)
+
+        lines = normalized_text.replace("\r\n", "\n").split("\n")
         cleaned_lines = []
         skip_heading_patterns = [
             re.compile(r"^\s*#\s*.+日记\s*$"),
@@ -1612,7 +1617,7 @@ class ScreenCompanionMemoryMixin:
         structured_summary: dict[str, Any] | None = None,
         weather_info: str = "",
     ) -> str:
-        observation_text = str(observation_text or "").strip()
+        observation_text = self._sanitize_diary_section_text(observation_text)
         reflection_text = self._sanitize_diary_section_text(reflection_text)
         structured_summary = structured_summary or {}
 
@@ -4765,24 +4770,50 @@ class ScreenCompanionMemoryMixin:
 
         state = self._ensure_auto_screen_runtime_state(task_id)
         now_ts = time.time()
+        is_window_companion_task = (
+            str(task_id or "").strip()
+            == str(getattr(self, "WINDOW_COMPANION_TASK_ID", "") or "").strip()
+        )
+        configured_probability = max(0, min(100, int(probability or 0)))
         if system_high_load:
-            decision = {
-                "trigger": True,
-                "reason": "系统负载较高，强制触发识屏",
-                "effective_probability": 100,
-                "random_number": None,
-                "idle_keepalive_due": False,
-            }
+            if is_window_companion_task:
+                random_number = random.randint(1, 100)
+                decision = {
+                    "trigger": random_number <= configured_probability,
+                    "reason": "系统负载较高，但窗口陪伴按设置概率判定",
+                    "effective_probability": configured_probability,
+                    "random_number": random_number,
+                    "idle_keepalive_due": False,
+                }
+            else:
+                decision = {
+                    "trigger": True,
+                    "reason": "系统负载较高，强制触发识屏",
+                    "effective_probability": 100,
+                    "random_number": None,
+                    "idle_keepalive_due": False,
+                }
         else:
             idle_keepalive_due = self._is_idle_keepalive_due(task_id, check_interval)
             if change_snapshot.get("changed"):
-                effective_probability = min(100, max(int(probability or 0), 85))
-                reason = f"检测到{change_snapshot.get('reason') or '窗口变化'}，提升本轮触发概率"
+                if is_window_companion_task:
+                    effective_probability = configured_probability
+                    reason = (
+                        f"检测到{change_snapshot.get('reason') or '窗口变化'}，"
+                        "窗口陪伴按设置概率判定"
+                    )
+                else:
+                    effective_probability = min(100, max(configured_probability, 85))
+                    reason = f"检测到{change_snapshot.get('reason') or '窗口变化'}，提升本轮触发概率"
             elif idle_keepalive_due:
-                effective_probability = min(100, max(int(probability or 0), 30))
-                reason = "当前窗口停留较久，保留一次低频跟进机会"
+                if is_window_companion_task:
+                    effective_probability = configured_probability
+                    reason = "当前窗口停留较久，窗口陪伴按设置概率判定"
+                else:
+                    effective_probability = min(100, max(configured_probability, 30))
+                    reason = "当前窗口停留较久，保留一次低频跟进机会"
             else:
-                effective_probability = min(int(probability or 0), 15)
+                effective_probability = min(configured_probability, 15)
                 reason = "当前画面变化不大，降低本轮触发概率"
 
             random_number = random.randint(1, 100)
@@ -4800,12 +4831,9 @@ class ScreenCompanionMemoryMixin:
                 change_snapshot=change_snapshot,
             )
             adjusted_probability = int(
-                max(
-                    1,
-                    round(
-                        float(decision["effective_probability"] or 0)
-                        * float(presence_mode.get("probability_factor", 1.0) or 1.0)
-                    ),
+                round(
+                    float(decision["effective_probability"] or 0)
+                    * float(presence_mode.get("probability_factor", 1.0) or 1.0)
                 )
             )
             adjusted_probability = min(100, adjusted_probability)
