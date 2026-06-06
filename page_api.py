@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import base64
+import mimetypes
 from typing import Any, Callable
 
 from astrbot.api import logger
@@ -66,6 +69,7 @@ class PluginPageApi:
             ("/activity", self._wrap(self.backend.handle_get_activity_stats), ["GET"], {}),
             ("/dashboard", self._wrap(self.backend.handle_get_dashboard_stats), ["GET"], {}),
             ("/media/latest/<kind>", self.handle_get_latest_media, ["GET"], {}),
+            ("/media/latest-data/<kind>", self.handle_get_latest_media_data, ["GET"], {}),
             ("/analyze/base64", self._wrap(self.backend.handle_analyze_image_base64), ["POST"], {}),
             ("/auth/info", self.handle_auth_info, ["GET"], {}),
             ("/auth/login", self.handle_auth_login, ["POST"], {}),
@@ -114,9 +118,43 @@ class PluginPageApi:
             path, _ = self.backend._resolve_latest_media_path(media_kind)
             if path is None or not path.is_file():
                 return self._err("Latest media is not available", 404)
-            return await send_file(str(path))
+            response = await send_file(str(path))
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            return response
         except Exception as exc:
             logger.error(f"插件拓展页面读取最新{media_kind}预览失败: {exc}")
+            return self._err(str(exc))
+
+    async def handle_get_latest_media_data(self, kind: str = ""):
+        media_kind = str(kind or "").strip().lower()
+        if media_kind not in {"image", "video"}:
+            return self._err("Unsupported media kind", 400)
+        try:
+            path, source = self.backend._resolve_latest_media_path(media_kind)
+            if path is None or not path.is_file():
+                return self._err("Latest media is not available", 404)
+            stat = path.stat()
+            fallback_mime = "video/mp4" if media_kind == "video" else "image/jpeg"
+            mime = mimetypes.guess_type(str(path))[0] or fallback_mime
+            raw = await asyncio.to_thread(path.read_bytes)
+            data = base64.b64encode(raw).decode("ascii")
+            return self._ok(
+                {
+                    "available": True,
+                    "kind": media_kind,
+                    "mime": mime,
+                    "mime_type": mime,
+                    "data_url": f"data:{mime};base64,{data}",
+                    "updated_at": stat.st_mtime,
+                    "size_bytes": int(stat.st_size),
+                    "source": source,
+                    "filename": path.name,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"插件拓展页面读取最新{media_kind}数据失败: {exc}", exc_info=True)
             return self._err(str(exc))
 
     async def handle_auth_info(self):

@@ -204,7 +204,7 @@ function formatBytes(value) {
 }
 
 async function apiFetch(url, options = {}) {
-    const bridge = window.AstrBotPluginPage;
+    const bridge = getPluginPageBridge();
     if (bridge) {
         const urlText = String(url || "");
         const [pathPart, queryString] = urlText.split("?");
@@ -281,6 +281,69 @@ async function apiFetch(url, options = {}) {
     }
 
     return payload;
+}
+
+function getPluginPageBridge() {
+    if (window.AstrBotPluginPage) return window.AstrBotPluginPage;
+    try {
+        if (window.parent && window.parent !== window && window.parent.AstrBotPluginPage) {
+            return window.parent.AstrBotPluginPage;
+        }
+    } catch (error) {
+        return null;
+    }
+    return null;
+}
+
+function resolveMediaUrl(url) {
+    const value = String(url || "");
+    if (!value || !getPluginPageBridge()) return value;
+    if (value.startsWith("/api/media/")) {
+        return `/astrbot_plugin_screen_companion${value.replace(/^\/api/, "")}`;
+    }
+    return value;
+}
+
+const mediaDataUrlCache = new Map();
+
+async function loadPluginPageMediaDataUrl(item) {
+    const bridge = getPluginPageBridge();
+    if (!bridge || !item?.available) return "";
+    const kind = item.kind === "video" ? "video" : "image";
+    const cacheKey = `${kind}:${item.updated_at || ""}:${item.size_bytes || 0}`;
+    if (mediaDataUrlCache.has(cacheKey)) return mediaDataUrlCache.get(cacheKey);
+    const data = await apiFetch(`/api/media/latest-data/${kind}`);
+    const dataUrl = String(data?.data_url || "");
+    if (dataUrl) mediaDataUrlCache.set(cacheKey, dataUrl);
+    return dataUrl;
+}
+
+async function hydratePluginPageMediaPreview(card, item) {
+    if (!getPluginPageBridge() || !card || !item?.available) return;
+    const frame = card.querySelector(".runtime-media-frame");
+    try {
+        const dataUrl = await loadPluginPageMediaDataUrl(item);
+        if (!dataUrl) return;
+        const link = card.querySelector(".runtime-media-link");
+        if (link) {
+            link.href = dataUrl;
+            link.removeAttribute("target");
+            link.download = item.filename || (item.kind === "video" ? "latest-recording.mp4" : "latest-screenshot.jpg");
+        }
+        if (item.kind === "video") {
+            const video = card.querySelector("video.runtime-media-preview");
+            const source = video?.querySelector("source");
+            if (source) source.src = dataUrl;
+            if (video) video.load();
+        } else {
+            const image = card.querySelector("img.runtime-media-preview");
+            if (image) image.src = dataUrl;
+        }
+    } catch (error) {
+        if (frame) {
+            frame.innerHTML = `<div class="empty-state"><strong>素材加载失败</strong><span>${escapeHtml(error?.message || "插件页媒体数据读取失败。")}</span></div>`;
+        }
+    }
 }
 
 function setFeedbackMessage(element, message, tone = "") {
@@ -1458,18 +1521,19 @@ function renderRuntimeMedia(runtime) {
             : (item.message || "暂无可预览素材");
         let preview = '<div class="empty-state"><strong>暂无可预览素材</strong></div>';
         if (item.available && item.url) {
+            const mediaUrl = resolveMediaUrl(item.url);
             if (item.kind === "video") {
                 preview = `
                     <video class="runtime-media-preview" controls preload="metadata">
-                        <source src="${escapeHtml(item.url)}" type="video/mp4">
+                        <source src="${escapeHtml(mediaUrl)}" type="video/mp4">
                     </video>
                 `;
             } else {
-                preview = `<img class="runtime-media-preview" src="${escapeHtml(item.url)}" alt="${escapeHtml(title)}">`;
+                preview = `<img class="runtime-media-preview" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(title)}">`;
             }
         }
         const action = item.available && item.url
-            ? `<a class="ghost-button runtime-media-link" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">打开原文件</a>`
+            ? `<a class="ghost-button runtime-media-link" href="${escapeHtml(resolveMediaUrl(item.url))}" target="_blank" rel="noreferrer">打开原文件</a>`
             : "";
         card.innerHTML = `
             <div class="panel-header">
@@ -1482,6 +1546,7 @@ function renderRuntimeMedia(runtime) {
             <div class="runtime-media-frame">${preview}</div>
         `;
         elements.runtimeMedia.appendChild(card);
+        hydratePluginPageMediaPreview(card, item);
     });
 }
 

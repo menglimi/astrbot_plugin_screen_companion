@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "3.1.0"
+    APP_VERSION = "3.1.1"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -3584,29 +3584,47 @@ class WebServer:
         plugin_data_dir = Path(getattr(self.plugin.plugin_config, "data_dir", Path.cwd()))
 
         if kind == "image":
+            candidates: list[tuple[Path, str]] = []
             local_path = plugin_data_dir / "screen_shot_latest.jpg"
             if local_path.is_file():
-                return local_path, "local_snapshot"
+                candidates.append((local_path, "local_snapshot"))
+            for suffix in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
+                candidates.extend(
+                    (path, "screen_material_snapshot")
+                    for path in plugin_data_dir.glob(f"screen_peek_*_latest{suffix[1:]}")
+                    if path.is_file()
+                )
 
             if self._plugin_bool("use_shared_screenshot_dir"):
                 shared_dir = Path(str(getattr(self.plugin, "shared_screenshot_dir", "") or "").strip())
                 if shared_dir.is_dir():
-                    candidates: list[Path] = []
                     for suffix in ("*.jpg", "*.jpeg", "*.png", "*.bmp", "*.webp"):
-                        candidates.extend(shared_dir.glob(suffix))
-                    if candidates:
-                        latest = max(candidates, key=lambda item: item.stat().st_mtime)
-                        return latest, "shared_directory"
+                        candidates.extend(
+                            (path, "shared_directory")
+                            for path in shared_dir.glob(suffix)
+                            if path.is_file()
+                        )
+            if candidates:
+                return max(candidates, key=lambda item: item[0].stat().st_mtime_ns)
             return None, "missing"
 
         if kind == "video":
+            candidates: list[tuple[Path, str]] = []
             local_path = plugin_data_dir / "screen_record_latest.mp4"
             if local_path.is_file():
-                return local_path, "local_snapshot"
+                candidates.append((local_path, "local_snapshot"))
+            for suffix in ("*.mp4", "*.webm", "*.mov"):
+                candidates.extend(
+                    (path, "screen_material_snapshot")
+                    for path in plugin_data_dir.glob(f"screen_peek_*_latest{suffix[1:]}")
+                    if path.is_file()
+                )
 
             current_path = Path(str(getattr(self.plugin, "_screen_recording_path", "") or "").strip())
             if current_path.is_file():
-                return current_path, "recording_cache"
+                candidates.append((current_path, "recording_cache"))
+            if candidates:
+                return max(candidates, key=lambda item: item[0].stat().st_mtime_ns)
             return None, "missing"
 
         return None, "invalid"
@@ -3637,7 +3655,7 @@ class WebServer:
         return {
             "available": True,
             "kind": kind,
-            "url": f"/api/media/latest/{kind}?ts={int(stat.st_mtime)}",
+            "url": f"/api/media/latest/{kind}?ts={stat.st_mtime_ns}",
             "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             "size_bytes": int(stat.st_size),
             "source": source,
@@ -4236,7 +4254,14 @@ class WebServer:
             path, _ = self._resolve_latest_media_path(kind)
             if path is None or not path.is_file():
                 return self._err("Latest media is not available", 404)
-            return web.FileResponse(path=path)
+            return web.FileResponse(
+                path=path,
+                headers={
+                    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         except Exception as e:
             logger.error(f"读取最新{kind}预览失败: {e}")
             return self._err(str(e))

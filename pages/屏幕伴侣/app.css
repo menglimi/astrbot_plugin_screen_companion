@@ -20,6 +20,10 @@
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 
+p, span, strong, h1, h2, h3, h4, li, code {
+    overflow-wrap: anywhere;
+}
+
 body {
     margin: 0;
     min-height: 100vh;
@@ -163,6 +167,10 @@ button { cursor: pointer; }
     border-radius: 999px;
     padding: 12px 18px;
     transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.25;
+    text-align: center;
 }
 
 .ghost-button {
@@ -311,6 +319,15 @@ button { cursor: pointer; }
 .section-heading, .panel-header {
     align-items: end;
     justify-content: space-between;
+    min-width: 0;
+}
+
+.panel-header {
+    flex-wrap: wrap;
+}
+
+.panel-header > * {
+    min-width: 0;
 }
 
 .section-heading { margin-bottom: 14px; }
@@ -354,6 +371,7 @@ button { cursor: pointer; }
     border: 1px solid rgba(97, 77, 64, 0.08);
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.62);
+    min-width: 0;
 }
 
 .runtime-media-card h4 {
@@ -530,6 +548,7 @@ button[disabled] {
     border-radius: 18px;
     background: rgba(255, 255, 255, 0.6);
     border: 1px solid rgba(97, 77, 64, 0.08);
+    min-width: 0;
 }
 
 .settings-field-dirty {
@@ -547,10 +566,13 @@ button[disabled] {
     gap: 12px;
     align-items: center;
     margin-bottom: 8px;
+    min-width: 0;
+    flex-wrap: wrap;
 }
 
 .settings-field-header strong {
     font-size: 1rem;
+    min-width: 0;
 }
 
 .settings-field-header code {
@@ -559,6 +581,8 @@ button[disabled] {
     background: rgba(42, 34, 29, 0.08);
     color: var(--muted);
     font-size: 0.78rem;
+    max-width: 100%;
+    white-space: normal;
 }
 
 .settings-badges {
@@ -577,6 +601,8 @@ button[disabled] {
     background: rgba(42, 34, 29, 0.06);
     color: var(--muted);
     font-size: 0.78rem;
+    max-width: 100%;
+    white-space: normal;
 }
 
 .settings-badge-warm {
@@ -1094,6 +1120,10 @@ button[disabled] {
 }
 
 @media (max-width: 720px) {
+    .settings-mode-toggle {
+        white-space: normal;
+    }
+
     .diary-toolbar {
         align-items: stretch;
     }
@@ -1225,10 +1255,12 @@ button[disabled] {
     opacity: 0.88;
 }
 
-.field { display: grid; gap: 8px; }
+.field { display: grid; gap: 8px; min-width: 0; }
 .compact-field { min-width: 170px; }
 
 .field input, .field select, .field textarea {
+    width: 100%;
+    min-width: 0;
     min-height: 44px;
     border-radius: 14px;
     border: 1px solid rgba(97, 77, 64, 0.14);
