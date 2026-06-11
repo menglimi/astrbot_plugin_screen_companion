@@ -671,7 +671,7 @@ function renderInputStatsSection(inputStats) {
     if (!elements.activityInputStats || !elements.activityInputDays) return;
 
     if (!inputStats || !inputStats.enabled) {
-        elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>未启用本地输入统计</strong><p>如果你想看更细的键鼠节奏，可以在配置中心开启这个可选功能。</p></div>";
+        elements.activityInputStats.innerHTML = "<div class='empty-state'><strong>未启用本地输入统计</strong><p>如果你想看更细的键盘节奏，可以在配置中心开启这个可选功能。</p></div>";
         elements.activityInputDays.innerHTML = "";
         return;
     }
@@ -688,9 +688,7 @@ function renderInputStatsSection(inputStats) {
 
     const cards = [
         { label: "今日按键", value: today.keys_label || "0 次", detail: "键盘按下次数" },
-        { label: "今日点击", value: today.clicks_label || "0 次", detail: "鼠标点击次数" },
-        { label: "滚轮步数", value: today.scroll_steps_label || "0 格", detail: "滚轮滚动累计" },
-        { label: "鼠标移动", value: today.move_pixels_label || "0 px", detail: `活跃 ${today.active_minutes_label || "0 分钟"}` },
+        { label: "活跃分钟", value: today.active_minutes_label || "0 分钟", detail: "基于键盘输入估算" },
         { label: "高峰时段", value: today.peak_hour_label || "暂无", detail: today.last_event_time_label ? `最近输入 ${today.last_event_time_label}` : statusText },
         { label: "近 7 天输入", value: inputStats.window_total_inputs_label || "0 次", detail: `累计活跃 ${inputStats.window_active_minutes_label || "0 分钟"}` },
         { label: "历史总计", value: inputStats.all_total_inputs_label || "0 次", detail: `累计 ${inputStats.all_active_days_label || "0 天"} · 活跃 ${inputStats.all_active_minutes_label || "0 分钟"}` },
@@ -721,7 +719,7 @@ function renderInputStatsSection(inputStats) {
                 <div class="activity-input-day-bar">
                     <span class="activity-input-day-bar-fill" style="width:${activeWidth}%"></span>
                 </div>
-                <p>${escapeHtml(`按键 ${item.keys_label || "0 次"} / 点击 ${item.clicks_label || "0 次"} / 活跃 ${item.active_minutes_label || "0 分钟"}`)}</p>
+                <p>${escapeHtml(`按键 ${item.keys_label || "0 次"} / 活跃 ${item.active_minutes_label || "0 分钟"}`)}</p>
             </article>
         `;
     }).join("");
@@ -1422,7 +1420,7 @@ function renderRuntimeInsights(runtime) {
             body: runtime.away_pause?.enabled
                 ? runtime.away_pause?.active
                     ? `${runtime.away_pause.detail || "当前已自动挂起自动观察。"}${runtime.away_pause.scene_label ? ` 离开前场景：${runtime.away_pause.scene_label}。` : ""}`
-                    : "已启用。非观影场景下，如果较长时间没有键鼠输入，会先暂停自动观察；检测到你回来继续操作后再自动恢复。"
+                    : "已启用。非观影场景下，如果较长时间没有键盘输入，会先暂停自动观察；检测到你回来继续操作后再自动恢复。"
                 : "默认关闭。适合需要长时间挂着自动观察、但又希望用户离开工位时先退到旁边的场景。",
             actions: [{ label: "调整挂起设置", action: "open-analytics-group" }],
         },

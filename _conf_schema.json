@@ -493,7 +493,7 @@
   "enable_input_stats": {
     "description": "启用本地输入统计",
     "type": "bool",
-      "hint": "开启后统计键盘和鼠标输入，用来判断活跃度和生成回顾。",
+      "hint": "开启后统计键盘输入，用来判断活跃度和生成回顾。为避免 Windows 鼠标钩子卡顿，默认不监听鼠标。",
     "default": false,
     "condition": {
       "enabled": true
@@ -535,7 +535,7 @@
   "enable_away_auto_pause": {
     "description": "离开电脑时自动挂起观察",
     "type": "bool",
-    "hint": "长时间没有键鼠输入时，自动观察会暂停；回来后自动恢复。",
+    "hint": "长时间没有键盘输入时，自动观察会暂停；回来后自动恢复。",
     "default": false,
     "condition": {
       "enabled": true,

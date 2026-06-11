@@ -2305,7 +2305,7 @@ class ScreenCompanionMediaMixin:
                             continue
 
                         # 检测窗口变化
-                        if elapsed % 3 == 0:  # 每3秒检测一次窗口变化
+                        if elapsed % 30 == 0:  # 降低窗口轮询频率，避免频繁调用系统窗口 API 造成鼠标卡顿
                             latest_window_changed, new_windows = self._detect_window_changes()
                             if latest_window_changed:
                                 window_changed = True

@@ -331,11 +331,11 @@ class ScreenCompanionInputStatsMixin:
             self._set_input_stats_status("disabled", "本地输入统计未启用")
             return False
         if getattr(self, "_input_stats_listeners", None):
-            self._set_input_stats_status("running", "本地输入统计正在监听键盘和鼠标")
+            self._set_input_stats_status("running", "本地输入统计正在监听键盘")
             return True
 
         try:
-            from pynput import keyboard, mouse
+            from pynput import keyboard
         except ImportError:
             self._set_input_stats_status(
                 "missing_dependency",
@@ -349,16 +349,13 @@ class ScreenCompanionInputStatsMixin:
         listeners = []
         try:
             keyboard_listener = keyboard.Listener(on_press=self._handle_input_key_press)
-            mouse_listener = mouse.Listener(
-                on_click=self._handle_input_mouse_click,
-                on_scroll=self._handle_input_mouse_scroll,
-                on_move=self._handle_input_mouse_move,
-            )
-            listeners = [keyboard_listener, mouse_listener]
+            # Windows 上 pynput 的全局鼠标钩子可能导致鼠标周期性卡顿；
+            # 本地输入统计先只保留键盘监听，避免影响光标流畅度。
+            listeners = [keyboard_listener]
             for listener in listeners:
                 listener.start()
             self._input_stats_listeners = listeners
-            self._set_input_stats_status("running", "本地输入统计已启动，将记录键盘和鼠标输入。")
+            self._set_input_stats_status("running", "本地输入统计已启动，将记录键盘输入。")
             return True
         except Exception as e:
             for listener in listeners:
@@ -466,7 +463,7 @@ class ScreenCompanionInputStatsMixin:
             return {
                 "presence_status": "no_data",
                 "presence_label": "等待输入样本",
-                "presence_detail": "输入监听已启动，等你开始敲键盘或移动鼠标后这里会变得更准确。",
+                "presence_detail": "输入监听已启动，等你开始敲键盘后这里会变得更准确。",
                 "idle_seconds": 0,
                 "idle_label": "",
                 "latest_event_at": "",
@@ -478,7 +475,7 @@ class ScreenCompanionInputStatsMixin:
             return {
                 "presence_status": "active",
                 "presence_label": "刚刚还有输入",
-                "presence_detail": f"最近 {idle_label} 有过键鼠输入，当前状态更接近真实在场。",
+                "presence_detail": f"最近 {idle_label} 有过键盘输入，当前状态更接近真实在场。",
                 "idle_seconds": idle_seconds,
                 "idle_label": idle_label,
                 "latest_event_at": event_time.isoformat(),
@@ -740,7 +737,7 @@ class ScreenCompanionInputStatsMixin:
                 lines.append(presence_detail)
             else:
                 lines.append("")
-                lines.append("今天还没有采集到有效的键盘或鼠标输入。")
+                lines.append("今天还没有采集到有效的键盘输入。")
             return "\n".join(lines)
 
         today = report.get("today", {}) if isinstance(report.get("today"), dict) else {}
@@ -748,9 +745,6 @@ class ScreenCompanionInputStatsMixin:
             "今日本地输入统计",
             "",
             f"- 键盘：{today.get('keys_label', '0 次')}",
-            f"- 点击：{today.get('clicks_label', '0 次')}",
-            f"- 滚轮：{today.get('scroll_steps_label', '0 格')}",
-            f"- 鼠标移动：{today.get('moves_label', '0 段')} / {today.get('move_pixels_label', '0 px')}",
             f"- 活跃分钟：{today.get('active_minutes_label', '0 分钟')}",
             f"- 输入总量：{today.get('total_inputs_label', '0 次')}",
             f"- 高峰时段：{today.get('peak_hour_label', '暂无')}",
