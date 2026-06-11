@@ -10,8 +10,8 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 
 ## 版本
 
-当前版本：`3.1.2`
-`3.1.2` 修复 Windows 上启用本地输入统计后，鼠标全局监听可能导致周期性卡顿的问题，并降低自动识屏等待期间的窗口变化检测频率。
+当前版本：`3.1.3`
+`3.1.3` 新增 macOS 录屏识别支持，macOS 下会通过 ffmpeg `avfoundation` 自动寻找屏幕录制设备；同时保留 `3.1.2` 的输入统计卡顿修复。
 
 ### 3.0.0 更新重点
 
@@ -70,7 +70,7 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 额外要求：
 
 - 截图模式需要系统截图权限。
-- 录屏模式需要可用的 `ffmpeg`。
+- 录屏模式需要可用的 `ffmpeg`；macOS 还需要给运行 AstrBot 的终端或应用授予“屏幕录制”权限。
 - 如果启用麦克风监听，需要系统麦克风权限，并额外安装可选麦克风依赖。
 - 如果启用本地输入统计，需要系统允许全局键盘监听，并授予对应权限。
 - 如果启用外部视觉链路，建议先选择支持多模态的 AstrBot 模型提供商。
@@ -302,6 +302,8 @@ Windows 默认路径通常是 `C:\Users\你的用户名\.astrbot\data\plugin_dat
 ```bash
 brew install ffmpeg
 ```
+
+macOS 首次使用录屏识别时，需要到“系统设置 -> 隐私与安全性 -> 屏幕录制”里，给运行 AstrBot 的终端、Python 或 AstrBot 桌面应用授权。授权后请重启 AstrBot。插件会自动调用 ffmpeg `avfoundation` 并优先选择名称包含 `Capture screen` 的设备。
 
 ### Linux
 

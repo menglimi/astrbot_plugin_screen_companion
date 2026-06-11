@@ -180,7 +180,7 @@
   "ffmpeg_path": {
     "description": "ffmpeg 可执行文件路径",
     "type": "string",
-    "hint": "选填，可留空。只在录屏模式下需要；一般留空自动查找。",
+    "hint": "选填，可留空。只在录屏模式下需要；一般留空自动查找。macOS 可用 brew install ffmpeg，并授予屏幕录制权限。",
     "default": "",
     "condition": {
       "enabled": true,

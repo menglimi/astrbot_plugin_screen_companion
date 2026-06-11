@@ -1,5 +1,16 @@
 # 屏幕伙伴更新日志
 
+## 3.1.3 (2026-06-12)
+
+### 新增
+
+- 录屏识别新增 macOS 支持，macOS 下会通过 ffmpeg `avfoundation` 自动寻找 `Capture screen` 设备进行桌面录制。
+
+### 优化
+
+- `/kpi ffmpeg` 在非 Windows 系统下会将二进制保存为 `ffmpeg`，不再统一保存为 `ffmpeg.exe`。
+- 录屏环境检查改为区分 Windows、macOS 和其它平台，给出更贴近当前系统的 ffmpeg 安装提示。
+
 ## 3.1.2 (2026-06-12)
 
 ### 修复

@@ -501,6 +501,116 @@ class ScreenCompanionRuntimeMixin:
         args.extend(["-pix_fmt", "yuv420p"])
         return args
 
+    def _is_recording_platform_supported(self) -> bool:
+        return sys.platform == "win32" or sys.platform == "darwin"
+
+    def _unsupported_recording_platform_message(self) -> str:
+        return "录屏视频识别目前支持 Windows 和 macOS 桌面环境。"
+
+    def _get_ffmpeg_missing_message(self) -> str:
+        if sys.platform == "win32":
+            return (
+                "未检测到 ffmpeg。请将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
+                "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
+            )
+        if sys.platform == "darwin":
+            return "未检测到 ffmpeg。请先执行 brew install ffmpeg，或在配置中填写 ffmpeg_path。"
+        return "未检测到 ffmpeg。请先安装 ffmpeg，或在配置中填写 ffmpeg_path。"
+
+    def _detect_macos_screen_device(self) -> str:
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            return "1"
+
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=10,
+            )
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        except Exception as e:
+            logger.debug(f"检测 macOS 屏幕录制设备失败，将使用默认设备: {e}")
+            return "1"
+
+        in_video_section = False
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            lower = line.lower()
+            if "avfoundation video devices" in lower:
+                in_video_section = True
+                continue
+            if "avfoundation audio devices" in lower:
+                in_video_section = False
+                continue
+            if not in_video_section:
+                continue
+            if "capture screen" not in lower and "screen" not in lower:
+                continue
+
+            import re
+
+            match = re.search(r"\[(\d+)\]", line)
+            if match:
+                device = match.group(1)
+                logger.info(f"检测到 macOS 屏幕录制设备: {line}")
+                return device
+
+        logger.info("未能从 avfoundation 设备列表中匹配屏幕设备，将使用默认设备 1")
+        return "1"
+
+    def _build_recording_input_args(self) -> list[str]:
+        fps = str(self._get_recording_fps())
+        if sys.platform == "win32":
+            args = [
+                "-f",
+                "gdigrab",
+                "-framerate",
+                fps,
+                "-i",
+                "desktop",
+            ]
+            audio_device = self._detect_system_audio_device()
+            if audio_device:
+                args.extend(
+                    [
+                        "-f",
+                        "dshow",
+                        "-i",
+                        f"audio={audio_device}",
+                        "-shortest",
+                    ]
+                )
+            return args
+
+        if sys.platform == "darwin":
+            screen_device = self._detect_macos_screen_device()
+            return [
+                "-f",
+                "avfoundation",
+                "-framerate",
+                fps,
+                "-capture_cursor",
+                "1",
+                "-i",
+                f"{screen_device}:none",
+            ]
+
+        raise RuntimeError(self._unsupported_recording_platform_message())
+
     @staticmethod
     def _build_evenly_spaced_indices(total_count: int, sample_count: int) -> list[int]:
         total = max(0, int(total_count or 0))
@@ -872,12 +982,9 @@ class ScreenCompanionRuntimeMixin:
     def _record_screen_clip_sync(self, duration_seconds: int) -> str:
         ffmpeg_path = self._get_ffmpeg_path()
         if not ffmpeg_path:
-            raise RuntimeError(
-                "\u672a\u627e\u5230 ffmpeg\uff0c\u8bf7\u5c06 ffmpeg.exe \u653e\u5230\u63d2\u4ef6\u76ee\u5f55\u4e0b\u7684 bin \u6587\u4ef6\u5939\uff0c"
-                "\u6216\u5728\u914d\u7f6e\u4e2d\u586b\u5199 ffmpeg_path\uff0c\u6216\u52a0\u5165 PATH\u3002"
-            )
-        if sys.platform != "win32":
-            raise RuntimeError("\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u76ee\u524d\u4ec5\u652f\u6301 Windows \u684c\u9762\u73af\u5883\u3002")
+            raise RuntimeError(self._get_ffmpeg_missing_message())
+        if not self._is_recording_platform_supported():
+            raise RuntimeError(self._unsupported_recording_platform_message())
 
         duration = max(1, int(duration_seconds or self._get_recording_duration_seconds()))
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -889,26 +996,8 @@ class ScreenCompanionRuntimeMixin:
             "-hide_banner",
             "-loglevel",
             "error",
-            "-f",
-            "gdigrab",
-            "-framerate",
-            str(self._get_recording_fps()),
-            "-i",
-            "desktop",
         ]
-
-        audio_device = self._detect_system_audio_device()
-        if audio_device:
-            cmd.extend(
-                [
-                    "-f",
-                    "dshow",
-                    "-i",
-                    f"audio={audio_device}",
-                    "-shortest",
-                ]
-            )
-
+        cmd.extend(self._build_recording_input_args())
         cmd.extend(
             [
                 "-t",
@@ -944,12 +1033,9 @@ class ScreenCompanionRuntimeMixin:
     def _start_screen_recording_sync(self) -> str:
         ffmpeg_path = self._get_ffmpeg_path()
         if not ffmpeg_path:
-            raise RuntimeError(
-                "未找到 ffmpeg，请将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
-                "或在配置中填写 ffmpeg_path，或加入 PATH。"
-            )
-        if sys.platform != "win32":
-            raise RuntimeError("录屏视频识别目前仅支持 Windows 桌面环境")
+            raise RuntimeError(self._get_ffmpeg_missing_message())
+        if not self._is_recording_platform_supported():
+            raise RuntimeError(self._unsupported_recording_platform_message())
 
         process = getattr(self, "_screen_recording_process", None)
         if process and process.poll() is None:
@@ -963,26 +1049,8 @@ class ScreenCompanionRuntimeMixin:
             "-hide_banner",
             "-loglevel",
             "error",
-            "-f",
-            "gdigrab",
-            "-framerate",
-            str(self._get_recording_fps()),
-            "-i",
-            "desktop",
         ]
-
-        audio_device = self._detect_system_audio_device()
-        if audio_device:
-            cmd.extend(
-                [
-                    "-f",
-                    "dshow",
-                    "-i",
-                    f"audio={audio_device}",
-                    "-shortest",
-                ]
-            )
-
+        cmd.extend(self._build_recording_input_args())
         cmd.extend(
             [
                 "-t",

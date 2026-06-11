@@ -5,6 +5,7 @@ import inspect
 import os
 import re
 import shutil
+import sys
 import time
 from typing import Any
 
@@ -1871,10 +1872,16 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 yield event.plain_result(f"当前 ffmpeg 路径：{current_ffmpeg}")
             else:
                 storage_dir = self._get_ffmpeg_storage_dir()
+                ffmpeg_binary_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+                example_path = (
+                    r"C:\Users\用户名\Downloads\ffmpeg\bin\ffmpeg.exe"
+                    if sys.platform == "win32"
+                    else "/opt/homebrew/bin/ffmpeg"
+                )
                 yield event.plain_result(
                     "未找到 ffmpeg。\n"
-                    "用法: /kpi ffmpeg [ffmpeg.exe 所在路径]\n"
-                    "例如: /kpi ffmpeg C:\\Users\\用户名\\Downloads\\ffmpeg\\bin\\ffmpeg.exe\n"
+                    f"用法: /kpi ffmpeg [{ffmpeg_binary_name} 所在路径]\n"
+                    f"例如: /kpi ffmpeg {example_path}\n"
                     "\n"
                     f"插件会自动将 ffmpeg 复制到插件数据目录的 bin 文件夹：{storage_dir}"
                 )
@@ -1884,7 +1891,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         
         ffmpeg_bin_dir = self._get_ffmpeg_storage_dir(create=True)
         
-        dest_path = os.path.join(ffmpeg_bin_dir, "ffmpeg.exe")
+        dest_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+        dest_path = os.path.join(ffmpeg_bin_dir, dest_name)
         
         if not os.path.exists(source_path):
             yield event.plain_result(f"源文件不存在：{source_path}")

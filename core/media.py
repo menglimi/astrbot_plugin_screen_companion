@@ -2791,8 +2791,7 @@ class ScreenCompanionMediaMixin:
             if missing_libs == ["ffmpeg"]:
                 return (
                     False,
-                    "缺少 ffmpeg。你可以将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
-                    "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
+                    self._get_ffmpeg_missing_message()
                 )
             return (
                 False,
@@ -2811,14 +2810,13 @@ class ScreenCompanionMediaMixin:
             return False, dep_msg
 
         if self._use_screen_recording_mode():
-            if sys.platform != "win32":
-                return False, "录屏视频识别目前仅支持 Windows 桌面环境。"
+            if not self._is_recording_platform_supported():
+                return False, self._unsupported_recording_platform_message()
             ffmpeg_path = self._get_ffmpeg_path()
             if not ffmpeg_path:
                 return (
                     False,
-                    "未检测到 ffmpeg。请将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
-                    "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
+                    self._get_ffmpeg_missing_message()
                 )
             return True, ""
 
@@ -4497,15 +4495,14 @@ class ScreenCompanionMediaMixin:
         if not dep_ok:
             return False, dep_msg
 
-        if sys.platform != "win32":
-            return False, "\u5f55\u5c4f\u89c6\u9891\u8bc6\u522b\u76ee\u524d\u4ec5\u652f\u6301 Windows \u684c\u9762\u73af\u5883\u3002"
+        if not self._is_recording_platform_supported():
+            return False, self._unsupported_recording_platform_message()
 
         ffmpeg_path = self._get_ffmpeg_path()
         if not ffmpeg_path:
             return (
                 False,
-                "\u672a\u68c0\u6d4b\u5230 ffmpeg\uff0c\u8bf7\u5c06 ffmpeg.exe \u653e\u5230\u63d2\u4ef6\u76ee\u5f55\u4e0b\u7684 bin \u6587\u4ef6\u5939\uff0c"
-                "\u6216\u5728\u914d\u7f6e\u4e2d\u586b\u5199 ffmpeg_path\uff0c\u6216\u52a0\u5165 PATH\u3002"
+                self._get_ffmpeg_missing_message()
             )
 
         return True, ""
