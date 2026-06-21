@@ -2762,6 +2762,9 @@ class ScreenCompanionMediaMixin:
         if self._use_screen_recording_mode():
             if not self._get_ffmpeg_path():
                 missing_libs.append("ffmpeg")
+        elif self._get_runtime_flag("remote_mode"):
+            # Remote mode: no local screenshot dependencies needed
+            pass
         else:
             try:
                 import pyautogui
@@ -2777,6 +2780,7 @@ class ScreenCompanionMediaMixin:
             sys.platform == "win32"
             and self.capture_active_window
             and not self._use_screen_recording_mode()
+            and not self._get_runtime_flag("remote_mode")
         ):
             try:
                 import pygetwindow
@@ -3251,6 +3255,18 @@ class ScreenCompanionMediaMixin:
 
     async def _capture_screen_bytes(self, *, force_fresh_capture: bool = False):
         """返回截图字节流与来源标签。"""
+
+        # Remote mode: return latest screenshot from WebSocket receiver
+        if self._get_runtime_flag("remote_mode"):
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver and receiver.has_screenshot:
+                image_bytes, window_title, meta = await receiver.get_latest_screenshot()
+                if image_bytes:
+                    return image_bytes, window_title or "远程客户端截图"
+                raise RuntimeError("远程客户端已连接但尚未推送截图")
+            raise RuntimeError(
+                "远程模式已开启但无可用截图，请确认客户端已连接并推送截图"
+            )
 
         def _core_task():
             import os
@@ -4508,6 +4524,9 @@ class ScreenCompanionMediaMixin:
         return True, ""
 
     def _check_screenshot_env(self, check_mic: bool = False) -> tuple[bool, str]:
+        if self._get_runtime_flag("remote_mode"):
+            return True, ""
+
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok and "ffmpeg" not in str(dep_msg or "").lower():
             return False, dep_msg

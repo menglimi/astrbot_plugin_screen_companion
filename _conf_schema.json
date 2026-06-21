@@ -22,7 +22,6 @@
     "hint": "自动观察总开关。关闭后仍可继续用手动识屏和 WebUI。",
     "default": false
   },
-
   "interaction_mode": {
     "description": "互动模式",
     "type": "string",
@@ -418,7 +417,6 @@
       "diary_auto_recall": true
     }
   },
-
   "diary_send_as_image": {
     "description": "以图片形式发送日记",
     "type": "bool",
@@ -429,7 +427,6 @@
       "enable_diary": true
     }
   },
-
   "diary_generation_prompt": {
     "description": "日记生成提示词",
     "type": "text",
@@ -493,7 +490,7 @@
   "enable_input_stats": {
     "description": "启用本地输入统计",
     "type": "bool",
-      "hint": "开启后统计键盘输入，用来判断活跃度和生成回顾。为避免 Windows 鼠标钩子卡顿，默认不监听鼠标。",
+    "hint": "开启后统计键盘输入，用来判断活跃度和生成回顾。为避免 Windows 鼠标钩子卡顿，默认不监听鼠标。",
     "default": false,
     "condition": {
       "enabled": true
@@ -616,7 +613,7 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-      "hint": "选填，可留空。接收主动消息的统一会话 ID，例如 `default:FriendMessage:123456`；不填就不主动推送。",
+    "hint": "选填，可留空。接收主动消息的统一会话 ID，例如 `default:FriendMessage:123456`；不填就不主动推送。",
     "default": "",
     "condition": {
       "enabled": true
@@ -682,6 +679,30 @@
       "screen_recognition_mode": false
     }
   },
+  "remote_mode": {
+    "description": "远程识屏模式",
+    "type": "bool",
+    "hint": "开启后，插件不再本地截图，而是通过 WebSocket 接收客户端推送的截图。适用于云服务器+本地客户端架构。",
+    "default": false
+  },
+  "remote_ws_port": {
+    "description": "远程 WebSocket 端口",
+    "type": "int",
+    "hint": "WebSocket 监听端口，客户端通过此端口推送截图。默认 6315。",
+    "default": 6315,
+    "condition": {
+      "remote_mode": true
+    }
+  },
+  "remote_auth_token": {
+    "description": "远程认证令牌",
+    "type": "string",
+    "hint": "客户端连接时的认证令牌。留空则不认证（不推荐）。",
+    "default": "",
+    "condition": {
+      "remote_mode": true
+    }
+  },
   "custom_tasks": {
     "description": "自定义监控任务",
     "type": "text",
@@ -735,7 +756,13 @@
     "type": "int",
     "hint": "互动强度快捷档位：1 最轻，5 最重。",
     "default": 3,
-    "enum": [1, 2, 3, 4, 5]
+    "enum": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
   },
   "debug": {
     "description": "调试模式",
