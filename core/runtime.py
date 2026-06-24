@@ -71,6 +71,8 @@ class ScreenCompanionRuntimeMixin:
         return self.SCREENSHOT_MODE
 
     def _use_screen_recording_mode(self) -> bool:
+        if self._get_runtime_flag("remote_mode"):
+            return False
         return (
             self._normalize_screen_recognition_mode(
                 getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)

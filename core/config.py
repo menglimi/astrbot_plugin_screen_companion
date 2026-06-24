@@ -116,6 +116,9 @@ class PluginConfig(BaseModel):
     window_companion_reattach_grace_seconds: int = 300
     use_shared_screenshot_dir: bool = False
     shared_screenshot_dir: str = ""
+    remote_mode: bool = False
+    remote_ws_port: int = 6315
+    remote_auth_token: str = ""
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True

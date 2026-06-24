@@ -30,6 +30,7 @@ from .core.proactive import ScreenCompanionProactiveMixin
 from .core.runtime import ScreenCompanionRuntimeMixin
 from .core.memory import ScreenCompanionMemoryMixin
 from .core.media import ScreenCompanionMediaMixin
+from .core.remote_receiver import RemoteScreenReceiver
 from .core.input_stats import ScreenCompanionInputStatsMixin
 from .core.command_support import ScreenCompanionCommandSupportMixin
 
@@ -345,6 +346,14 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._sync_all_config()
         self._instance_token = ""
         self._register_process_instance()
+
+        # Remote screen receiver
+        self._remote_receiver = None
+        if self._get_runtime_flag("remote_mode"):
+            self._remote_receiver = RemoteScreenReceiver(
+                port=int(getattr(self, "remote_ws_port", 6315) or 6315),
+                auth_token=str(getattr(self, "remote_auth_token", "") or ""),
+            )
         self._cleanup_legacy_default_custom_tasks()
         
         self.auto_tasks = {}
@@ -496,6 +505,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._screen_assist_cooldowns = {}
         self.last_shared_activity_invite_time = 0.0
         self._ensure_input_stats_listener()
+        if self._remote_receiver:
+            task = asyncio.create_task(self._remote_receiver.start())
+            self.background_tasks.append(task)
         if self._use_screen_recording_mode():
             self._safe_create_task(
                 self._ensure_recording_ready(),
@@ -508,6 +520,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         global _screen_companion_tool_plugin
         if _screen_companion_tool_plugin is self:
             _screen_companion_tool_plugin = None
+        if self._remote_receiver:
+            await self._remote_receiver.stop()
+            self._remote_receiver = None
         await self.stop()
 
     def _register_plugin_page_api_if_available(self) -> None:
@@ -961,6 +976,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.current_preset_index = -1
             self.plugin_config.current_preset_index = -1
         self._sync_window_companion_effective_params()
+        self.remote_mode = self._coerce_bool(getattr(self.plugin_config, "remote_mode", False))
+        self.remote_ws_port = max(1, int(getattr(self.plugin_config, "remote_ws_port", 6315) or 6315))
+        self.remote_auth_token = str(getattr(self.plugin_config, "remote_auth_token", "") or "")
         # 同步配置
         self.observation_storage = self._normalize_config_path(
             self.plugin_config.observation_storage,
