@@ -21,6 +21,12 @@ class ScreenCompanionInputStatsMixin:
     INPUT_IDLE_THRESHOLD_SECONDS = 5 * 60
     INPUT_AWAY_THRESHOLD_SECONDS = 20 * 60
 
+    @staticmethod
+    def _coerce_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
     def _ensure_input_stats_state(self) -> None:
         if not hasattr(self, "input_stats_daily") or not isinstance(getattr(self, "input_stats_daily", None), dict):
             self.input_stats_daily = {}
@@ -330,6 +336,17 @@ class ScreenCompanionInputStatsMixin:
         if not self.enable_input_stats:
             self._set_input_stats_status("disabled", "本地输入统计未启用")
             return False
+
+        # Remote mode: skip local pynput listener, data comes via WebSocket
+        if self._coerce_bool(getattr(self, "remote_mode", False)):
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver and receiver.is_running:
+                self._set_input_stats_status("running", "远程模式：等待客户端推送输入统计")
+                return True
+            else:
+                self._set_input_stats_status("waiting", "远程模式：接收服务未就绪")
+                return False
+
         if getattr(self, "_input_stats_listeners", None):
             self._set_input_stats_status("running", "本地输入统计正在监听键盘")
             return True
@@ -367,10 +384,45 @@ class ScreenCompanionInputStatsMixin:
             self._set_input_stats_status("error", f"启动本地输入统计失败: {e}")
             return False
 
+    async def _ingest_remote_input_stats(self) -> None:
+        if not self._coerce_bool(getattr(self, "remote_mode", False)):
+            return
+        receiver = getattr(self, "_remote_receiver", None)
+        if not receiver or not receiver.is_running:
+            return
+        if receiver.latest_input_stats_age_seconds > 120:
+            return
+        try:
+            stats = await receiver.get_latest_input_stats()
+        except Exception:
+            return
+        if not stats:
+            return
+        keys = int(stats.get("keys", 0) or 0)
+        clicks = int(stats.get("clicks", 0) or 0)
+        scrolls = int(stats.get("scroll_steps", 0) or 0)
+        moves = int(stats.get("moves", 0) or 0)
+        move_pixels = int(stats.get("move_pixels", 0) or 0)
+        if keys > 0:
+            self._record_input_event("keys", keys)
+        if clicks > 0:
+            self._record_input_event("clicks", clicks)
+        if scrolls > 0:
+            self._record_input_event("scroll_steps", scrolls)
+        if moves > 0:
+            self._record_input_event("moves", move_pixels)
+
     async def _input_stats_flush_task(self) -> None:
         self._ensure_input_stats_state()
         while getattr(self, "running", False) and not bool(getattr(self, "_is_stopping", False)):
             await asyncio.sleep(10)
+
+            # Ingest remote input stats if in remote mode
+            try:
+                await self._ingest_remote_input_stats()
+            except Exception as e:
+                logger.debug(f"Remote input stats ingest error: {e}")
+
             flush_interval = max(10, int(getattr(self, "input_stats_flush_interval", 60) or 60))
             last_flush_time = float(getattr(self, "_input_stats_last_flush_time", 0.0) or 0.0)
             if bool(getattr(self, "_input_stats_dirty", False)) and (time.time() - last_flush_time) >= flush_interval:

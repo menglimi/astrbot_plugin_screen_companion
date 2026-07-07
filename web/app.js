@@ -203,6 +203,15 @@ function formatBytes(value) {
     return `${current.toFixed(digits)} ${units[index]}`;
 }
 
+const PAGE_ENDPOINT_PREFIX = "page";
+
+function bridgeEndpointCandidates(endpoint) {
+    const cleanEndpoint = String(endpoint || "").replace(/^\/+/, "").replace(/\/+$/, "");
+    const candidates = [`${PAGE_ENDPOINT_PREFIX}/${cleanEndpoint}`, cleanEndpoint, `/${cleanEndpoint}`];
+    const seen = new Set();
+    return candidates.filter((item) => item && !seen.has(item) && seen.add(item));
+}
+
 async function apiFetch(url, options = {}) {
     const bridge = getPluginPageBridge();
     if (bridge) {
@@ -226,15 +235,20 @@ async function apiFetch(url, options = {}) {
                 body = {};
             }
         }
-        try {
-            if (method === "GET") {
-                return await bridge.apiGet(endpoint, Object.keys(params).length ? params : undefined);
+        const candidates = bridgeEndpointCandidates(endpoint);
+        const errors = [];
+        for (const candidate of candidates) {
+            try {
+                if (method === "GET") {
+                    return await bridge.apiGet(candidate, Object.keys(params).length ? params : undefined);
+                }
+                return await bridge.apiPost(candidate, body || {});
+            } catch (error) {
+                errors.push(error?.message || String(error));
             }
-            return await bridge.apiPost(endpoint, body || {});
-        } catch (error) {
-            const message = error?.message || `请求失败 (${method} ${endpoint})`;
-            throw new Error(`${message} @ ${endpoint}`);
         }
+        const message = errors[0] || `请求失败 (${method} ${endpoint})`;
+        throw new Error(`${message} @ ${endpoint}`);
     }
 
     const headers = { ...(options.headers || {}) };
@@ -299,7 +313,7 @@ function resolveMediaUrl(url) {
     const value = String(url || "");
     if (!value || !getPluginPageBridge()) return value;
     if (value.startsWith("/api/media/")) {
-        return `/astrbot_plugin_screen_companion${value.replace(/^\/api/, "")}`;
+        return `/astrbot_plugin_screen_companion/page${value.replace(/^\/api/, "")}`;
     }
     return value;
 }
@@ -2408,7 +2422,7 @@ function renderObservationPagination() {
 }
 
 async function deleteObservation(index) {
-    await apiFetch(`/api/observations/${index}`, { method: "DELETE" });
+    await apiFetch(`/api/observations/${index}`, { method: "POST" });
     state.selectedObservationIndices.delete(index);
     await loadRuntime();
     await loadObservations();
@@ -2416,7 +2430,7 @@ async function deleteObservation(index) {
 }
 
 async function deleteDiary(date) {
-    await apiFetch(`/api/diary/${date}`, { method: "DELETE" });
+    await apiFetch(`/api/diary/${date}`, { method: "POST" });
     state.selectedDiaryDates.delete(date);
     const fallbackDate = pickDiaryFallbackDate([date]);
     if (state.selectedDiaryDate === date) {
@@ -2432,7 +2446,7 @@ async function deleteSelectedDiaries() {
     if (!dates.length) return { deletedCount: 0, deletedDates: [] };
     const fallbackDate = pickDiaryFallbackDate(dates);
     const data = await apiFetch("/api/diaries/batch", {
-        method: "DELETE",
+        method: "POST",
         body: JSON.stringify({ dates }),
     });
     dates.forEach((date) => state.selectedDiaryDates.delete(date));
@@ -2450,7 +2464,7 @@ async function deleteSelectedObservations() {
     const indices = Array.from(state.selectedObservationIndices);
     if (!indices.length) return;
     await apiFetch("/api/observations/batch", {
-        method: "DELETE",
+        method: "POST",
         body: JSON.stringify({ indices }),
     });
     state.selectedObservationIndices.clear();

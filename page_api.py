@@ -12,7 +12,7 @@ from quart import jsonify, request, send_file
 from .web_server import WebServer
 
 PLUGIN_NAME = "astrbot_plugin_screen_companion"
-PAGE_API_PREFIX = f"/{PLUGIN_NAME}"
+PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
 
 class _QuartRequestAdapter:
@@ -83,6 +83,7 @@ class PluginPageApi:
                 methods,
                 f"Screen Companion Page: {route}",
             )
+        logger.info("[ScreenCompanion] 插件拓展页面 API 已注册")
 
     @staticmethod
     def _ok(data: dict | None = None, **kwargs):

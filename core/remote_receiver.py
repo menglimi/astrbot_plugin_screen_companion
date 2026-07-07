@@ -31,6 +31,14 @@ class RemoteScreenReceiver:
         self._connected_clients: set = set()
         self._lock = asyncio.Lock()
 
+        # Remote input stats (received from client)
+        self._latest_input_stats: dict[str, Any] = {}
+        self._latest_input_stats_timestamp: float = 0.0
+
+        # Remote mic volume (received from client)
+        self._latest_mic_volume: int = 0
+        self._latest_mic_volume_timestamp: float = 0.0
+
     @property
     def has_screenshot(self) -> bool:
         return bool(self._latest_image_bytes) and self._latest_timestamp > 0.0
@@ -52,6 +60,26 @@ class RemoteScreenReceiver:
                 self._latest_window_title,
                 dict(self._latest_meta),
             )
+
+    async def get_latest_input_stats(self) -> dict[str, Any]:
+        async with self._lock:
+            return dict(self._latest_input_stats)
+
+    @property
+    def latest_input_stats_age_seconds(self) -> float:
+        if self._latest_input_stats_timestamp <= 0:
+            return float("inf")
+        return time.time() - self._latest_input_stats_timestamp
+
+    async def get_latest_mic_volume(self) -> int:
+        async with self._lock:
+            return self._latest_mic_volume
+
+    @property
+    def latest_mic_volume_age_seconds(self) -> float:
+        if self._latest_mic_volume_timestamp <= 0:
+            return float("inf")
+        return time.time() - self._latest_mic_volume_timestamp
 
     async def start(self) -> None:
         if self.is_running:
@@ -173,6 +201,32 @@ class RemoteScreenReceiver:
                 self._latest_timestamp = time.time()
             await websocket.send(json.dumps({"status": "screenshot_received"}))
             logger.debug(f"收到 bundle 截图: {len(jpeg_bytes)} bytes")
+            return
+
+        if msg_type == "input_stats":
+            async with self._lock:
+                self._latest_input_stats = {
+                    "keys": int(data.get("keys", 0) or 0),
+                    "clicks": int(data.get("clicks", 0) or 0),
+                    "scroll_steps": int(data.get("scroll_steps", 0) or 0),
+                    "moves": int(data.get("moves", 0) or 0),
+                    "move_pixels": int(data.get("move_pixels", 0) or 0),
+                    "window_title": str(data.get("window_title", "") or ""),
+                    "timestamp": data.get("timestamp", time.time()),
+                    "client_id": str(data.get("client_id", "") or ""),
+                }
+                self._latest_input_stats_timestamp = time.time()
+            await websocket.send(json.dumps({"status": "input_stats_received"}))
+            logger.debug(f"Remote input stats: keys={data.get('keys', 0)}, clicks={data.get('clicks', 0)}")
+            return
+
+        if msg_type == "mic_volume":
+            volume = max(0, min(100, int(data.get("volume", 0) or 0)))
+            async with self._lock:
+                self._latest_mic_volume = volume
+                self._latest_mic_volume_timestamp = time.time()
+            await websocket.send(json.dumps({"status": "mic_volume_received", "volume": volume}))
+            logger.debug(f"Remote mic volume: {volume}")
             return
 
         await websocket.send(json.dumps({"error": f"未知消息类型: {msg_type}"}))

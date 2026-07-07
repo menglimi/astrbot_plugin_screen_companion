@@ -1949,35 +1949,40 @@ class ScreenCompanionMediaMixin:
     async def _mic_monitor_task(self):
         """后台麦克风监听任务。"""
         self._ensure_runtime_state()
-        # 检查麦克风依赖
+        # Remote mode: skip local pyaudio check, volume comes via WebSocket
+        is_remote = self._coerce_bool(getattr(self, "remote_mode", False))
         mic_deps_ok = False
-        try:
-            import sys
-
-            logger.info(f"[麦克风依赖检查] Python 路径: {sys.path}")
-            logger.info(f"[麦克风依赖检查] Python 可执行文件: {sys.executable}")
-
-            import pyaudio
-
-            logger.info(f"[麦克风依赖检查] PyAudio 已加载: {pyaudio.__version__}")
-
-            import numpy
-
-            logger.info(f"[麦克风依赖检查] NumPy 已加载: {numpy.__version__}")
-
+        if is_remote:
             mic_deps_ok = True
-        except Exception as e:
-            missing_mic_libs = self._get_missing_mic_dependencies()
-            logger.warning(f"[麦克风依赖检查] 麦克风监听依赖不可用: {e}")
-            if missing_mic_libs:
-                logger.warning(self._format_missing_dependency_message(missing_mic_libs))
-            elif sys.platform.startswith("linux"):
-                logger.warning(
-                    "[麦克风依赖检查] PyAudio 初始化失败，请确认已安装 PortAudio 相关系统库，并授予麦克风权限。"
-                )
-            import traceback
+            logger.info("[麦克风监控] 远程模式：跳过本地 pyaudio 依赖检查，等待客户端推送音量")
+        else:
+            try:
+                import sys
 
-            logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
+                logger.info(f"[麦克风依赖检查] Python 路径: {sys.path}")
+                logger.info(f"[麦克风依赖检查] Python 可执行文件: {sys.executable}")
+
+                import pyaudio
+
+                logger.info(f"[麦克风依赖检查] PyAudio 已加载: {pyaudio.__version__}")
+
+                import numpy
+
+                logger.info(f"[麦克风依赖检查] NumPy 已加载: {numpy.__version__}")
+
+                mic_deps_ok = True
+            except Exception as e:
+                missing_mic_libs = self._get_missing_mic_dependencies()
+                logger.warning(f"[麦克风依赖检查] 麦克风监听依赖不可用: {e}")
+                if missing_mic_libs:
+                    logger.warning(self._format_missing_dependency_message(missing_mic_libs))
+                elif sys.platform.startswith("linux"):
+                    logger.warning(
+                        "[麦克风依赖检查] PyAudio 初始化失败，请确认已安装 PortAudio 相关系统库，并授予麦克风权限。"
+                    )
+                import traceback
+
+                logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
 
         while self.enable_mic_monitor and self._is_current_process_instance():
             try:
@@ -1992,8 +1997,15 @@ class ScreenCompanionMediaMixin:
                     await asyncio.sleep(self.mic_check_interval)
                     continue
 
-                # 获取麦克风音量
-                volume = self._get_microphone_volume()
+                # 获取麦克风音量 (remote mode: from receiver, local: from pyaudio)
+                if self._coerce_bool(getattr(self, "remote_mode", False)):
+                    receiver = getattr(self, "_remote_receiver", None)
+                    if receiver and receiver.is_running and receiver.latest_mic_volume_age_seconds < 30:
+                        volume = await receiver.get_latest_mic_volume()
+                    else:
+                        volume = 0
+                else:
+                    volume = self._get_microphone_volume()
                 logger.debug(f"麦克风音量: {volume}")
 
                 if volume > self.mic_threshold:
@@ -2808,6 +2820,13 @@ class ScreenCompanionMediaMixin:
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
+        # Remote mode: no local desktop needed
+        if self._coerce_bool(getattr(self, "remote_mode", False)):
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver and receiver.is_running:
+                return True, ""
+            return False, "远程模式接收服务未就绪，请检查插件配置"
+
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
