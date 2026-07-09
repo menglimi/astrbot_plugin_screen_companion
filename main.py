@@ -77,6 +77,35 @@ def _get_tool_event(context: Any) -> AstrMessageEvent | None:
         return None
 
 
+async def _ensure_tool_admin_permission(
+    plugin: Any,
+    context: Any,
+    *,
+    tool_name: str,
+) -> tuple[bool, str]:
+    event = _get_tool_event(context)
+    if event is None:
+        logger.warning(
+            "拒绝执行 LLM 工具 %s：未获得事件上下文，按安全策略默认拒绝。",
+            tool_name,
+        )
+        return False, "权限不足：当前会话未通过权限校验，无法使用该工具。"
+
+    if plugin._has_admin_permission(event):
+        return True, ""
+
+    sender_id = plugin._get_event_sender_id(event) or "unknown"
+    scope = "group" if plugin._is_group_message_event(event) else "private"
+    logger.warning(
+        "拒绝执行 LLM 工具 %s：非管理员请求。scope=%s sender=%s session=%s",
+        tool_name,
+        scope,
+        sender_id,
+        str(getattr(event, "unified_msg_origin", "") or ""),
+    )
+    return False, "权限不足：仅管理员可使用屏幕观察或电脑使用情况工具。"
+
+
 def _extract_plain_text(components: Any) -> str:
     if not isinstance(components, list):
         return ""
@@ -115,6 +144,14 @@ class ScreenPeekTool(FunctionTool[AstrAgentContext]):
         plugin = _screen_companion_tool_plugin
         if plugin is None:
             return "屏幕陪伴工具当前不可用。"
+
+        allowed, denial_message = await _ensure_tool_admin_permission(
+            plugin,
+            context.context,
+            tool_name=self.name,
+        )
+        if not allowed:
+            return denial_message
 
         question = str(kwargs.get("question", "") or "").strip()
         event = _get_tool_event(context.context)
@@ -170,6 +207,14 @@ class ScreenUsageContextTool(FunctionTool[AstrAgentContext]):
         plugin = _screen_companion_tool_plugin
         if plugin is None:
             return "电脑使用情况工具当前不可用。"
+
+        allowed, denial_message = await _ensure_tool_admin_permission(
+            plugin,
+            context.context,
+            tool_name=self.name,
+        )
+        if not allowed:
+            return denial_message
 
         question = str(kwargs.get("question", "") or "").strip()
         include_browser_history = bool(kwargs.get("include_browser_history", False))
