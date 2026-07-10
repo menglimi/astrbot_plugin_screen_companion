@@ -205,8 +205,7 @@ class ScreenCompanionMemoryMixin:
                 self.observations = self.observations[-9:]
             # 整理和补正未知观察记录
             self._cleanup_unknown_observations()
-            with open(observations_file, "w", encoding="utf-8") as f:
-                json.dump(self.observations, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(observations_file, self.observations)
         except Exception as e:
             logger.error(f"保存观察记录失败: {e}")
 
@@ -316,8 +315,7 @@ class ScreenCompanionMemoryMixin:
         try:
             import json
             import os
-            with open(self.diary_metadata_file, "w", encoding="utf-8") as f:
-                json.dump(self.diary_metadata, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(self.diary_metadata_file, self.diary_metadata)
         except Exception as e:
             logger.error(f"保存日记元数据失败: {e}")
 
@@ -351,8 +349,10 @@ class ScreenCompanionMemoryMixin:
             import json
             import os
             self._clean_long_term_memory_noise()
-            with open(self.long_term_memory_file, "w", encoding="utf-8") as f:
-                json.dump(self.long_term_memory, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(
+                self.long_term_memory_file,
+                self.long_term_memory,
+            )
             logger.info("长期记忆保存成功")
         except Exception as e:
             logger.error(f"保存长期记忆失败: {e}")
@@ -360,8 +360,9 @@ class ScreenCompanionMemoryMixin:
     @staticmethod
     def _normalize_scene_label(scene: str) -> str:
         scene = str(scene or "").strip()
-        invalid_labels = {"", "??", "unknown", "???", "?????", "none", "null", "未知"}
-        return "" if scene.lower() in invalid_labels or scene in invalid_labels else scene
+        invalid_labels = {"", "unknown", "none", "null", "未知"}
+        is_question_placeholder = bool(scene) and set(scene) == {"?"}
+        return "" if scene.lower() in invalid_labels or is_question_placeholder else scene
 
     @staticmethod
     def _normalize_window_title(window_title: str) -> str:
@@ -2021,8 +2022,7 @@ class ScreenCompanionMemoryMixin:
     ) -> None:
         summary_path = self._get_diary_summary_path(target_date)
         try:
-            with open(summary_path, "w", encoding="utf-8") as f:
-                json.dump(structured_summary, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(summary_path, structured_summary)
         except Exception as e:
             logger.error(f"保存日记结构化摘要失败: {e}")
 
@@ -3718,8 +3718,7 @@ class ScreenCompanionMemoryMixin:
             if not activity_history_file:
                 activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
                 self.activity_history_file = activity_history_file
-            with open(activity_history_file, "w", encoding="utf-8") as f:
-                json.dump(self.activity_history, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(activity_history_file, self.activity_history)
         except Exception as e:
             logger.error(f"保存活动历史失败: {e}")
 
@@ -3772,8 +3771,7 @@ class ScreenCompanionMemoryMixin:
                     else ""
                 ),
             }
-            with open(state_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(state_file, payload)
         except Exception as e:
             logger.error(f"保存休息提醒状态失败: {e}")
 

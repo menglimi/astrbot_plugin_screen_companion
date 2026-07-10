@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "3.2.0"
+    APP_VERSION = "3.2.2"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -240,14 +240,10 @@ class WebServer:
         self.app.router.add_get("/api/diaries", self.handle_list_diaries)
         self.app.router.add_get("/api/diary/{date}", self.handle_get_diary)
         self.app.router.add_delete("/api/diary/{date}", self.handle_delete_diary)
-        self.app.router.add_post("/api/diary/{date}", self.handle_delete_diary)
         self.app.router.add_delete("/api/diaries/batch", self.handle_batch_delete_diaries)
-        self.app.router.add_post("/api/diaries/batch", self.handle_batch_delete_diaries)
         self.app.router.add_get("/api/observations", self.handle_list_observations)
         self.app.router.add_delete("/api/observations/{index}", self.handle_delete_observation)
-        self.app.router.add_post("/api/observations/{index}", self.handle_delete_observation)
         self.app.router.add_delete("/api/observations/batch", self.handle_batch_delete_observations)
-        self.app.router.add_post("/api/observations/batch", self.handle_batch_delete_observations)
         self.app.router.add_post("/api/data/clear", self.handle_clear_all_data)
         self.app.router.add_get("/api/memories", self.handle_list_memories)
         self.app.router.add_get("/api/config", self.handle_get_config)
@@ -2525,7 +2521,10 @@ class WebServer:
                 or obs.get("window_title")
                 or ""
             ).strip()
-            if active_window.lower() in {"unknown", "none", "null"} or active_window in {"??", "?????"}:
+            if (
+                active_window.lower() in {"unknown", "none", "null"}
+                or (active_window and set(active_window) == {"?"})
+            ):
                 active_window = ""
 
             content = str(
@@ -4340,7 +4339,9 @@ class WebServer:
                 }
 
             recognition_text = await self.plugin._call_external_vision_api(image_bytes)
-            if not recognition_text or "??" in recognition_text or "??" in recognition_text:
+            if not recognition_text or any(
+                marker in recognition_text for marker in ("识别失败", "无法识别")
+            ):
                 return {
                     "success": False,
                     "error": recognition_text or "Vision recognition failed",

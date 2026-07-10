@@ -693,6 +693,8 @@
     "type": "int",
     "hint": "WebSocket 监听端口，客户端通过此端口推送截图。默认 6315。",
     "default": 6315,
+    "min": 1,
+    "max": 65535,
     "condition": {
       "remote_mode": true
     }
@@ -711,6 +713,8 @@
     "type": "int",
     "hint": "单位为秒。超过这个时间未收到新截图时，会把远程画面判定为过期。默认 60 秒。",
     "default": 60,
+    "min": 5,
+    "max": 86400,
     "condition": {
       "remote_mode": true
     }

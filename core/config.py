@@ -117,9 +117,9 @@ class PluginConfig(BaseModel):
     use_shared_screenshot_dir: bool = False
     shared_screenshot_dir: str = ""
     remote_mode: bool = False
-    remote_ws_port: int = 6315
+    remote_ws_port: int = Field(default=6315, ge=1, le=65535)
     remote_auth_token: str = ""
-    remote_screenshot_max_age: int = 60
+    remote_screenshot_max_age: int = Field(default=60, ge=5, le=86400)
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True
@@ -440,21 +440,6 @@ class PluginConfig(BaseModel):
         except Exception as e:
             logger.debug(f"[Config] 读取文件失败 {path}: {e}")
             return None
-
-    def _write_json_file(self, path: Path, data: Any) -> bool:
-        try:
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True
-        except PermissionError as e:
-            logger.error(f"[Config] 权限不足，无法写入文件 {path}: {e}")
-            return False
-        except OSError as e:
-            logger.error(f"[Config] 写入文件失败 {path}: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"[Config] 写入 JSON 文件时发生未知错误 {path}: {e}")
-            return False
 
     def save_webui_config(self) -> None:
         """保存 WebUI 配置。"""

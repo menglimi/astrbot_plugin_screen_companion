@@ -91,11 +91,29 @@ async def _ensure_tool_admin_permission(
         )
         return False, "权限不足：当前会话未通过权限校验，无法使用该工具。"
 
-    if plugin._has_admin_permission(event):
-        return True, ""
+    if not bool(getattr(plugin, "enabled", False)):
+        logger.warning(
+            "拒绝执行 LLM 工具 %s：屏幕伙伴插件当前未启用。session=%s",
+            tool_name,
+            str(getattr(event, "unified_msg_origin", "") or ""),
+        )
+        return False, "屏幕伙伴插件当前未启用，不能使用屏幕观察或电脑使用情况工具。"
 
     sender_id = plugin._get_event_sender_id(event) or "unknown"
     scope = "group" if plugin._is_group_message_event(event) else "private"
+    if not plugin._is_private_message_event(event):
+        logger.warning(
+            "拒绝执行 LLM 工具 %s：屏幕隐私工具只允许管理员私聊触发。scope=%s sender=%s session=%s",
+            tool_name,
+            scope,
+            sender_id,
+            str(getattr(event, "unified_msg_origin", "") or ""),
+        )
+        return False, "权限不足：屏幕观察和电脑使用情况工具只能由管理员在私聊中使用。"
+
+    if plugin._has_admin_permission(event):
+        return True, ""
+
     logger.warning(
         "拒绝执行 LLM 工具 %s：非管理员请求。scope=%s sender=%s session=%s",
         tool_name,
@@ -122,6 +140,7 @@ class ScreenPeekTool(FunctionTool[AstrAgentContext]):
     description: str = (
         "当你需要确认用户当前屏幕上正在做什么、界面里具体出现了什么、"
         "或需要基于当前画面给出判断时使用。只在当前消息和对话上下文不足时调用。"
+        "仅允许在管理员私聊授权场景中使用。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -181,6 +200,7 @@ class ScreenUsageContextTool(FunctionTool[AstrAgentContext]):
     description: str = (
         "当你需要了解用户最近在电脑上主要做了什么、持续了多久、"
         "或最近浏览过哪些页面时使用。只在确实需要近期活动轨迹时调用，不要每轮都查。"
+        "仅允许在管理员私聊授权场景中使用。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -611,13 +631,16 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self._remote_receiver = None
             return
         self._remote_receiver = RemoteScreenReceiver(
-            port=max(1, int(getattr(self, "remote_ws_port", 6315) or 6315)),
+            port=min(65535, max(1, int(getattr(self, "remote_ws_port", 6315) or 6315))),
             auth_token=str(getattr(self, "remote_auth_token", "") or ""),
         )
 
     async def _sync_remote_receiver_runtime(self) -> None:
         enabled = self._get_runtime_flag("remote_mode")
-        desired_port = max(1, int(getattr(self, "remote_ws_port", 6315) or 6315))
+        desired_port = min(
+            65535,
+            max(1, int(getattr(self, "remote_ws_port", 6315) or 6315)),
+        )
         desired_token = str(getattr(self, "remote_auth_token", "") or "")
         receiver = getattr(self, "_remote_receiver", None)
 
@@ -708,6 +731,17 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
         unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
         return ":GroupMessage:" in unified_msg_origin
+
+    def _is_private_message_event(self, event: AstrMessageEvent) -> bool:
+        checker = getattr(event, "is_private_chat", None)
+        if callable(checker):
+            try:
+                if checker():
+                    return True
+            except Exception:
+                pass
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        return ":FriendMessage:" in unified_msg_origin and not self._is_group_message_event(event)
 
     def _has_admin_permission(self, event: AstrMessageEvent) -> bool:
         is_admin = getattr(event, "is_admin", None)
@@ -1029,9 +1063,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.remote_mode = self._coerce_bool(
             getattr(self.plugin_config, "remote_mode", False)
         )
-        self.remote_ws_port = max(
-            1,
-            int(getattr(self.plugin_config, "remote_ws_port", 6315) or 6315),
+        self.remote_ws_port = min(
+            65535,
+            max(1, int(getattr(self.plugin_config, "remote_ws_port", 6315) or 6315)),
         )
         self.remote_auth_token = str(
             getattr(self.plugin_config, "remote_auth_token", "") or ""
@@ -1588,6 +1622,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 task_id="manual",
                 custom_prompt="",
                 history_user_text="/kp",
+                user_request_text=(
+                    "用户刚刚执行了 /kp 立即截图识别命令；命令已被插件成功识别并执行。"
+                    "请直接根据当前截图回应，不要询问 /kp 是什么，也不要把它当成误输入。"
+                ),
                 capture_context=capture_context,
             )
 
@@ -1648,6 +1686,10 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 task_id="manual_recording",
                 custom_prompt="",
                 history_user_text="/kpr",
+                user_request_text=(
+                    "用户刚刚执行了 /kpr 立即录屏识别命令；命令已被插件成功识别并执行。"
+                    "请直接根据录屏内容回应，不要询问 /kpr 是什么，也不要把它当成误输入。"
+                ),
                 capture_context=capture_context,
                 analysis_timeout=self._get_screen_analysis_timeout("video"),
             )
@@ -1728,6 +1770,15 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 allow_implicit=allow_implicit_trigger,
             )
             if not request_prompt:
+                return
+
+            if not self._is_private_message_event(event):
+                if self.debug:
+                    sender_id = self._get_event_sender_id(event) or "<unknown>"
+                    scope = "群聊" if self._is_group_message_event(event) else "非私聊"
+                    logger.debug(
+                        f"自然语言识屏求助被拒绝：{scope} 发送者 {sender_id}；屏幕内容只允许管理员私聊触发"
+                    )
                 return
 
             if not await self._ensure_admin_permission(

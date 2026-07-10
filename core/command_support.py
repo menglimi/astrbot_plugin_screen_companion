@@ -174,15 +174,12 @@ class ScreenCompanionCommandSupportMixin:
             return
         try:
             os.makedirs(self.diary_storage, exist_ok=True)
-            with open(pending_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    self._sort_pending_diary_entries(
-                        list(getattr(self, "diary_entries", []) or [])
-                    ),
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
+            self._atomic_write_json_file(
+                pending_file,
+                self._sort_pending_diary_entries(
+                    list(getattr(self, "diary_entries", []) or [])
+                ),
+            )
         except Exception as e:
             logger.error(f"保存待写日记条目失败: {e}")
 
@@ -222,23 +219,6 @@ class ScreenCompanionCommandSupportMixin:
     def _has_saved_diary_for_date(self, target_date: datetime.date) -> bool:
         return os.path.exists(self._get_diary_file_path(target_date))
 
-    def _is_empty_diary_placeholder_for_date(self, target_date: datetime.date) -> bool:
-        if not self._has_saved_diary_for_date(target_date):
-            return False
-        summary = self._load_diary_structured_summary(target_date)
-        if isinstance(summary, dict) and int(summary.get("entry_count", 0) or 0) > 0:
-            return False
-        try:
-            with open(self._get_diary_file_path(target_date), encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            return False
-        empty_markers = (
-            "今天用户没给我看屏幕的机会",
-            "今天留下的观察线索太少了",
-        )
-        return any(marker in content for marker in empty_markers)
-
     def _get_latest_saved_diary_date(self) -> datetime.date | None:
         try:
             latest_date = None
@@ -262,77 +242,6 @@ class ScreenCompanionCommandSupportMixin:
             for entry in list(getattr(self, "diary_entries", []) or [])
             if str(entry.get("date", "") or "").strip() == date_key
         ]
-
-    def _get_observation_diary_entries_for_date(
-        self,
-        target_date: datetime.date,
-        *,
-        limit: int = 18,
-    ) -> list[dict[str, str]]:
-        date_key = target_date.isoformat()
-        entries: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str, str]] = set()
-        for observation in list(getattr(self, "observations", []) or []):
-            if not isinstance(observation, dict):
-                continue
-            timestamp_text = str(observation.get("timestamp") or "").strip()
-            observation_date = None
-            if timestamp_text:
-                try:
-                    observation_date = self._resolve_diary_target_date(
-                        datetime.datetime.fromisoformat(timestamp_text)
-                    )
-                except Exception:
-                    observation_date = self._parse_diary_date_value(timestamp_text[:10])
-            if observation_date != target_date:
-                continue
-
-            content = str(
-                observation.get("description")
-                or observation.get("recognition_summary")
-                or observation.get("recognition")
-                or ""
-            ).strip()
-            if not content:
-                continue
-
-            time_text = "00:00:00"
-            if timestamp_text:
-                try:
-                    time_text = datetime.datetime.fromisoformat(timestamp_text).strftime(
-                        "%H:%M:%S"
-                    )
-                except Exception:
-                    if len(timestamp_text) >= 19:
-                        time_text = timestamp_text[11:19]
-
-            normalized = self._normalize_pending_diary_entry(
-                {
-                    "date": date_key,
-                    "time": time_text,
-                    "timestamp": timestamp_text or f"{date_key}T{time_text}",
-                    "content": content,
-                    "active_window": observation.get("active_window")
-                    or observation.get("window_title")
-                    or "当前窗口",
-                }
-            )
-            if not normalized:
-                continue
-            key = (
-                normalized.get("date", ""),
-                normalized.get("time", ""),
-                normalized.get("active_window", ""),
-                self._normalize_record_text(normalized.get("content", "")),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append(normalized)
-
-        if limit > 0 and len(entries) > limit:
-            entries = entries[-limit:]
-        return self._sort_pending_diary_entries(entries)
 
     def _replace_pending_diary_entries_for_date(
         self,
@@ -368,13 +277,9 @@ class ScreenCompanionCommandSupportMixin:
         *,
         hour: int,
         minute: int,
-        early_morning_cutoff_hour: int = 2,
     ) -> bool:
-        scheduled_date = target_date
-        if hour < max(0, int(early_morning_cutoff_hour or 0)):
-            scheduled_date = target_date + datetime.timedelta(days=1)
         scheduled_at = datetime.datetime.combine(
-            scheduled_date,
+            target_date,
             datetime.time(hour=hour, minute=minute),
         )
         return now >= scheduled_at
@@ -403,37 +308,14 @@ class ScreenCompanionCommandSupportMixin:
                 minute=minute,
             )
         }
-        for observation in list(getattr(self, "observations", []) or []):
-            if not isinstance(observation, dict):
-                continue
-            timestamp_text = str(observation.get("timestamp") or "").strip()
-            try:
-                entry_date = self._resolve_diary_target_date(
-                    datetime.datetime.fromisoformat(timestamp_text)
-                )
-            except Exception:
-                entry_date = self._parse_diary_date_value(timestamp_text[:10])
-            placeholder_ready = self._is_empty_diary_placeholder_for_date(entry_date) if entry_date else False
-            if not entry_date:
-                continue
-            if self._has_saved_diary_for_date(entry_date) and not placeholder_ready:
-                continue
-            if not placeholder_ready and not self._is_diary_due_for_date(
-                entry_date,
+        if (
+            self._is_diary_due_for_date(
+                current_target_date,
                 current,
                 hour=hour,
                 minute=minute,
-            ):
-                continue
-            candidate_dates.add(entry_date)
-        if self._is_diary_due_for_date(
-            current_target_date,
-            current,
-            hour=hour,
-            minute=minute,
-        ) and (
-            not self._has_saved_diary_for_date(current_target_date)
-            or self._is_empty_diary_placeholder_for_date(current_target_date)
+            )
+            and not self._has_saved_diary_for_date(current_target_date)
         ):
             candidate_dates.add(current_target_date)
         return sorted(candidate_dates)
@@ -898,28 +780,13 @@ class ScreenCompanionCommandSupportMixin:
             return
 
         target_date = target_date or self._resolve_diary_target_date()
-        if self._has_saved_diary_for_date(target_date) and not self._is_empty_diary_placeholder_for_date(target_date):
+        if self._has_saved_diary_for_date(target_date):
             self._clear_pending_diary_entries_for_date(target_date)
             self.last_diary_date = target_date
             return
 
         pending_entries = self._get_pending_diary_entries_for_date(target_date)
-        observation_entries: list[dict[str, str]] = []
-        source_entries = self._sort_pending_diary_entries(pending_entries)
-        compacted_entries = self._compact_diary_entries(source_entries)
-        if len(compacted_entries) < 3:
-            observation_entries = self._get_observation_diary_entries_for_date(
-                target_date,
-                limit=max(3, 18 - len(pending_entries)),
-            )
-            if observation_entries:
-                source_entries = self._sort_pending_diary_entries(
-                    pending_entries + observation_entries
-                )
-                compacted_entries = self._compact_diary_entries(source_entries)
-                logger.info(
-                    f"日记素材不足，使用 {len(observation_entries)} 条观察记录补充 {target_date.isoformat()} 的日记素材"
-                )
+        compacted_entries = self._compact_diary_entries(pending_entries)
         activity_fallback_entries: list[dict[str, str]] = []
         if len(compacted_entries) < 3:
             activity_fallback_entries = self._build_diary_activity_fallback_entries(
@@ -932,7 +799,7 @@ class ScreenCompanionCommandSupportMixin:
                 )
 
         diary_source_entries = self._sort_pending_diary_entries(
-            source_entries + activity_fallback_entries
+            pending_entries + activity_fallback_entries
         )
         if not diary_source_entries and not allow_empty:
             return

@@ -65,8 +65,7 @@ class ScreenCompanionMediaMixin:
                 f.write(media_bytes)
             if metadata is not None:
                 metadata_path = data_dir / f"{base_name}_meta.json"
-                with open(metadata_path, "w", encoding="utf-8") as f:
-                    json.dump(metadata, f, ensure_ascii=False, indent=2)
+                self._atomic_write_json_file(metadata_path, metadata)
             return str(material_path)
         except Exception as e:
             logger.error(f"保存识屏调试素材失败({base_name}): {e}")
@@ -228,8 +227,7 @@ class ScreenCompanionMediaMixin:
 
         try:
             learning_file = os.path.join(self.learning_storage, "learning_data.json")
-            with open(learning_file, "w", encoding="utf-8") as f:
-                json.dump(self.learning_data, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(learning_file, self.learning_data)
             logger.info("学习数据保存成功")
         except Exception as e:
             logger.error(f"保存学习数据失败: {e}")
@@ -260,8 +258,7 @@ class ScreenCompanionMediaMixin:
             if not corrections_file:
                 corrections_file = os.path.join(self.learning_storage, "corrections.json")
                 self.corrections_file = corrections_file
-            with open(corrections_file, "w", encoding="utf-8") as f:
-                json.dump(self.corrections, f, ensure_ascii=False, indent=2)
+            self._atomic_write_json_file(corrections_file, self.corrections)
             logger.info("纠正数据保存成功")
         except Exception as e:
             logger.error(f"保存纠正数据失败: {e}")
@@ -1166,14 +1163,53 @@ class ScreenCompanionMediaMixin:
                 return ""
 
             for msg in reversed(conversation.history[-8:]):
-                if str(msg.get("role", "") or "") != "assistant":
+                role, content = self._unpack_conversation_message(msg)
+                if role != "assistant":
                     continue
-                content = str(msg.get("content", "") or "").strip()
                 if content:
                     return content
         except Exception as e:
             logger.debug(f"读取最近助手回复失败: {e}")
         return ""
+
+    @staticmethod
+    def _unpack_conversation_message(message: Any) -> tuple[str, str]:
+        """Normalize AstrBot conversation entries across framework versions."""
+        item = message
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return "", ""
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                return "", text
+            if isinstance(decoded, dict):
+                item = decoded
+            else:
+                return "", text
+
+        if isinstance(item, dict):
+            role = str(item.get("role", "") or "").strip().lower()
+            content = item.get("content", "")
+        else:
+            role = str(getattr(item, "role", "") or "").strip().lower()
+            content = getattr(item, "content", "")
+
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    value = part.get("text", part.get("content", ""))
+                else:
+                    value = getattr(part, "text", getattr(part, "content", part))
+                value = str(value or "").strip()
+                if value:
+                    parts.append(value)
+            content_text = "\n".join(parts)
+        else:
+            content_text = str(content or "").strip()
+        return role, content_text
 
     def _remember_recent_assistant_reply(self, target: str, reply_text: str) -> None:
         target = str(target or "").strip()
@@ -1949,40 +1985,35 @@ class ScreenCompanionMediaMixin:
     async def _mic_monitor_task(self):
         """后台麦克风监听任务。"""
         self._ensure_runtime_state()
-        # Remote mode: skip local pyaudio check, volume comes via WebSocket
-        is_remote = self._coerce_bool(getattr(self, "remote_mode", False))
+        # 检查麦克风依赖
         mic_deps_ok = False
-        if is_remote:
+        try:
+            import sys
+
+            logger.info(f"[麦克风依赖检查] Python 路径: {sys.path}")
+            logger.info(f"[麦克风依赖检查] Python 可执行文件: {sys.executable}")
+
+            import pyaudio
+
+            logger.info(f"[麦克风依赖检查] PyAudio 已加载: {pyaudio.__version__}")
+
+            import numpy
+
+            logger.info(f"[麦克风依赖检查] NumPy 已加载: {numpy.__version__}")
+
             mic_deps_ok = True
-            logger.info("[麦克风监控] 远程模式：跳过本地 pyaudio 依赖检查，等待客户端推送音量")
-        else:
-            try:
-                import sys
+        except Exception as e:
+            missing_mic_libs = self._get_missing_mic_dependencies()
+            logger.warning(f"[麦克风依赖检查] 麦克风监听依赖不可用: {e}")
+            if missing_mic_libs:
+                logger.warning(self._format_missing_dependency_message(missing_mic_libs))
+            elif sys.platform.startswith("linux"):
+                logger.warning(
+                    "[麦克风依赖检查] PyAudio 初始化失败，请确认已安装 PortAudio 相关系统库，并授予麦克风权限。"
+                )
+            import traceback
 
-                logger.info(f"[麦克风依赖检查] Python 路径: {sys.path}")
-                logger.info(f"[麦克风依赖检查] Python 可执行文件: {sys.executable}")
-
-                import pyaudio
-
-                logger.info(f"[麦克风依赖检查] PyAudio 已加载: {pyaudio.__version__}")
-
-                import numpy
-
-                logger.info(f"[麦克风依赖检查] NumPy 已加载: {numpy.__version__}")
-
-                mic_deps_ok = True
-            except Exception as e:
-                missing_mic_libs = self._get_missing_mic_dependencies()
-                logger.warning(f"[麦克风依赖检查] 麦克风监听依赖不可用: {e}")
-                if missing_mic_libs:
-                    logger.warning(self._format_missing_dependency_message(missing_mic_libs))
-                elif sys.platform.startswith("linux"):
-                    logger.warning(
-                        "[麦克风依赖检查] PyAudio 初始化失败，请确认已安装 PortAudio 相关系统库，并授予麦克风权限。"
-                    )
-                import traceback
-
-                logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
+            logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
 
         while self.enable_mic_monitor and self._is_current_process_instance():
             try:
@@ -1997,15 +2028,8 @@ class ScreenCompanionMediaMixin:
                     await asyncio.sleep(self.mic_check_interval)
                     continue
 
-                # 获取麦克风音量 (remote mode: from receiver, local: from pyaudio)
-                if self._coerce_bool(getattr(self, "remote_mode", False)):
-                    receiver = getattr(self, "_remote_receiver", None)
-                    if receiver and receiver.is_running and receiver.latest_mic_volume_age_seconds < 30:
-                        volume = await receiver.get_latest_mic_volume()
-                    else:
-                        volume = 0
-                else:
-                    volume = self._get_microphone_volume()
+                # 获取麦克风音量
+                volume = self._get_microphone_volume()
                 logger.debug(f"麦克风音量: {volume}")
 
                 if volume > self.mic_threshold:
@@ -2820,13 +2844,6 @@ class ScreenCompanionMediaMixin:
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
-        # Remote mode: no local desktop needed
-        if self._coerce_bool(getattr(self, "remote_mode", False)):
-            receiver = getattr(self, "_remote_receiver", None)
-            if receiver and receiver.is_running:
-                return True, ""
-            return False, "远程模式接收服务未就绪，请检查插件配置"
-
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
@@ -4489,6 +4506,7 @@ class ScreenCompanionMediaMixin:
         task_id: str = "manual",
         custom_prompt: str = "",
         history_user_text: str = "/kp",
+        user_request_text: str | None = None,
         capture_context: dict[str, Any] | None = None,
         capture_timeout: float | None = None,
         analysis_timeout: float | None = None,
@@ -4539,7 +4557,7 @@ class ScreenCompanionMediaMixin:
                 active_window_title=active_window_title,
                 custom_prompt=custom_prompt,
                 task_id=task_id,
-                user_request_text=history_user_text,
+                user_request_text=user_request_text or history_user_text,
             ),
             timeout=effective_analysis_timeout,
         )
@@ -4741,12 +4759,12 @@ class ScreenCompanionMediaMixin:
                 "adobe", "affinity", "paint", "draw", "illustration", "animation"
             ],
             "浏览": [
-                "chrome", "firefox", "edge", "safari", "opera", "browser", "???",
+                "chrome", "firefox", "edge", "safari", "opera", "browser", "浏览器",
                 "chrome.exe", "firefox.exe", "edge.exe", "safari.exe", "opera.exe",
                 "browser", "web", "internet", "chrome", "firefox", "edge", "safari", "opera"
             ],
             "办公": [
-                "word", "excel", "powerpoint", "office", "??", "??", "wps", "outlook",
+                "word", "excel", "powerpoint", "office", "文档", "表格", "wps", "outlook",
                 "office365", "onenote", "access", "project", "visio",
                 "document", "spreadsheet", "presentation", "calendar", "task", "todo",
                 "work", "office", "business", "report", "data", "analysis", "excel"
@@ -4761,19 +4779,19 @@ class ScreenCompanionMediaMixin:
                 "character", "weapon", "map", "server", "multiplayer", "singleplayer"
             ],
             "视频": [
-                "youtube", "bilibili", "netflix", "vlc", "potplayer", "movie", "video", "??",
+                "youtube", "bilibili", "netflix", "vlc", "potplayer", "movie", "video", "视频",
                 "youku", "tudou", "iqiyi", "letv", "mkv", "mp4", "wmv", "avi",
                 "media player", "kmplayer", "mplayer",
                 "video", "movie", "film", "tv", "show", "series", "episode", "streaming",
                 "watch", "player", "media", "video", "movie", "film", "tv", "show"
             ],
             "阅读": [
-                "novel", "reader", "ebook", "pdf", "reading", "??", "???", "???",
+                "novel", "reader", "ebook", "pdf", "reading", "阅读", "小说", "电子书",
                 "adobe reader", "foxit", "kindle", "ibooks", "epub", "mobi",
                 "book", "read", "reading", "novel", "story", "document", "pdf", "epub"
             ],
             "音乐": [
-                "spotify", "apple music", "music", "itunes", "?????", "qq??", "musicbee",
+                "spotify", "apple music", "music", "itunes", "网易云音乐", "qq音乐", "musicbee",
                 "网易云", "netease", "kuwo", "kugou", "qq music", "winamp", "foobar",
                 "music", "song", "audio", "player", "music", "song", "audio", "playlist"
             ],
@@ -5037,11 +5055,10 @@ class ScreenCompanionMediaMixin:
                         conversation = await conv_mgr.get_conversation(uid, curr_cid)
                         if conversation and conversation.history:
                             for msg in conversation.history[-8:]:
-                                if msg.get("role") in {"user", "assistant"}:
-                                    content = str(msg.get("content", "") or "").strip()
-                                    if content:
-                                        role = "用户" if msg.get("role") == "user" else "助手"
-                                        contexts.append(f"{role}: {content}")
+                                role, content = self._unpack_conversation_message(msg)
+                                if role in {"user", "assistant"} and content:
+                                    label = "用户" if role == "user" else "助手"
+                                    contexts.append(f"{label}: {content}")
                 except Exception as e:
                     if debug_mode:
                         logger.debug(f"读取对话上下文失败: {e}")
@@ -5055,7 +5072,7 @@ class ScreenCompanionMediaMixin:
                         existing.add(line)
 
             if not contexts:
-                recent_trace_lines = self._collect_recent_start_end_context(limit=3)
+                recent_trace_lines = self._collect_start_end_reference_lines(limit=3)
                 if recent_trace_lines:
                     contexts.extend(f"助手: {line}" for line in recent_trace_lines)
         except Exception as e:

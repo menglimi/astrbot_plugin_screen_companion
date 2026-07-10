@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import io
+import json
 import os
 import secrets
 import shutil
@@ -23,6 +24,35 @@ _ACTIVE_INSTANCE_TOKEN = ""
 
 
 class ScreenCompanionRuntimeMixin:
+    @staticmethod
+    def _atomic_write_json_file(path: str | os.PathLike[str], data: Any) -> None:
+        """Write UTF-8 JSON without exposing a partially written target file."""
+        target = os.path.abspath(os.fspath(path))
+        parent = os.path.dirname(target) or os.curdir
+        os.makedirs(parent, exist_ok=True)
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=parent,
+                prefix=f".{os.path.basename(target)}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = handle.name
+                json.dump(data, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, target)
+            temp_path = ""
+        finally:
+            if temp_path:
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
     @staticmethod
     def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
         """创建带异常兜底的后台任务。"""
