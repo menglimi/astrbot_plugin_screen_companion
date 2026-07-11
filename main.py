@@ -67,12 +67,19 @@ def admin_required(func):
 
 
 def _get_tool_event(context: Any) -> AstrMessageEvent | None:
+    """Resolve the message event from current and legacy tool contexts."""
     try:
-        agent_ctx = getattr(context, "context", None)
-        event = getattr(agent_ctx, "event", None) if agent_ctx else None
-        if event is None and agent_ctx is not None:
-            event = getattr(getattr(agent_ctx, "context", None), "event", None)
-        return event
+        current = context
+        seen: set[int] = set()
+        for _ in range(3):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            event = getattr(current, "event", None)
+            if event is not None:
+                return event
+            current = getattr(current, "context", None)
+        return None
     except Exception:
         return None
 
