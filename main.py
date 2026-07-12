@@ -173,14 +173,14 @@ class ScreenPeekTool(FunctionTool[AstrAgentContext]):
 
         allowed, denial_message = await _ensure_tool_admin_permission(
             plugin,
-            context.context,
+            context,
             tool_name=self.name,
         )
         if not allowed:
             return denial_message
 
         question = str(kwargs.get("question", "") or "").strip()
-        event = _get_tool_event(context.context)
+        event = _get_tool_event(context)
         try:
             capture_context = await plugin._capture_recognition_context()
             active_window_title = str(capture_context.get("active_window_title", "") or "")
@@ -237,7 +237,7 @@ class ScreenUsageContextTool(FunctionTool[AstrAgentContext]):
 
         allowed, denial_message = await _ensure_tool_admin_permission(
             plugin,
-            context.context,
+            context,
             tool_name=self.name,
         )
         if not allowed:
