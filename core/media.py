@@ -1860,6 +1860,23 @@ class ScreenCompanionMediaMixin:
     def _get_microphone_volume(self):
         """读取当前麦克风音量。"""
         self._ensure_runtime_state()
+        # Remote mode: use the latest volume pushed by desktop client.
+        try:
+            remote_mode = bool(
+                self._get_runtime_flag("remote_mode")
+                if hasattr(self, "_get_runtime_flag")
+                else getattr(self, "remote_mode", False)
+            )
+        except Exception:
+            remote_mode = bool(getattr(self, "remote_mode", False))
+        if remote_mode:
+            volume = int(getattr(self, "_remote_mic_volume", 0) or 0)
+            ts = float(getattr(self, "_remote_mic_timestamp", 0.0) or 0.0)
+            max_age = max(5, int(getattr(self, "remote_screenshot_max_age", 60) or 60))
+            if ts > 0 and (time.time() - ts) <= max_age:
+                return min(100, max(0, volume))
+            return 0
+
         p = None
         stream = None
         try:
@@ -1935,8 +1952,116 @@ class ScreenCompanionMediaMixin:
                 except Exception:
                     pass
 
+    def _apply_remote_mic_volume(self, volume: int, payload: dict | None = None) -> None:
+        """Store remote mic volume and optionally trigger the same high-volume path."""
+        self._ensure_runtime_state()
+        vol = min(100, max(0, int(volume or 0)))
+        self._remote_mic_volume = vol
+        self._remote_mic_timestamp = time.time()
+        if not bool(getattr(self, "enable_mic_monitor", False)):
+            return
+        try:
+            threshold = int(getattr(self, "mic_threshold", 60) or 60)
+            debounce = float(getattr(self, "mic_debounce_time", 30) or 30)
+            now = time.time()
+            last = float(getattr(self, "last_mic_trigger", 0.0) or 0.0)
+            if vol > threshold and (now - last) >= debounce:
+                self._safe_create_task(
+                    self._handle_remote_mic_trigger(vol),
+                    name="remote_mic_trigger",
+                )
+        except Exception as e:
+            logger.debug(f"远程麦克风触发检查失败: {e}")
+
+    async def _handle_remote_mic_trigger(self, volume: int) -> None:
+        self._ensure_runtime_state()
+        if not bool(getattr(self, "enable_mic_monitor", False)):
+            return
+        now = time.time()
+        last = float(getattr(self, "last_mic_trigger", 0.0) or 0.0)
+        debounce = float(getattr(self, "mic_debounce_time", 30) or 30)
+        if now - last < debounce:
+            return
+        threshold = int(getattr(self, "mic_threshold", 60) or 60)
+        if int(volume or 0) <= threshold:
+            return
+        self.last_mic_trigger = now
+        logger.info(f"远程麦克风音量超过阈值: {volume} > {threshold}")
+        ok, err_msg = self._check_env(check_mic=False)
+        if not ok:
+            logger.error(f"远程麦克风触发失败: {err_msg}")
+            return
+        try:
+            current_state = self.state
+            if current_state == "inactive":
+                self.state = "temporary"
+            temp_task_id = f"temp_mic_remote_{int(time.time())}"
+
+            async def temp_mic_task():
+                background_job_started = False
+                try:
+                    background_job_started, skip_reason = self._try_begin_background_screen_job()
+                    if not background_job_started:
+                        logger.info(f"[{temp_task_id}] 跳过远程麦克风触发识屏: {skip_reason}")
+                        return
+                    target = self._resolve_proactive_target()
+                    event = self._create_virtual_event(target)
+                    capture_timeout = self._get_capture_context_timeout(
+                        "video" if self._use_screen_recording_mode() else "image"
+                    )
+                    capture_context = await asyncio.wait_for(
+                        self._capture_proactive_recognition_context(),
+                        timeout=capture_timeout,
+                    )
+                    active_window_title = capture_context.get("active_window_title", "")
+                    components = await asyncio.wait_for(
+                        self._analyze_screen(
+                            capture_context,
+                            session=event,
+                            active_window_title=active_window_title,
+                            custom_prompt="刚才那边好像有点动静？让我看看你现在在做什么呢。",
+                            task_id=temp_task_id,
+                        ),
+                        timeout=self._get_screen_analysis_timeout(
+                            capture_context.get("media_kind", "image")
+                        ),
+                    )
+                    target = self._resolve_proactive_target()
+                    if target and await self._send_component_text(target, components):
+                        logger.info("远程麦克风提醒消息发送成功")
+                        if capture_context.get("_rest_reminder_planned"):
+                            self._mark_rest_reminder_sent(
+                                capture_context.get("_rest_reminder_info", {}) or {}
+                            )
+                except Exception as exc:
+                    logger.error(f"[{temp_task_id}] 远程麦克风触发识屏失败: {exc}")
+                finally:
+                    if temp_task_id in getattr(self, "temporary_tasks", {}):
+                        try:
+                            del self.temporary_tasks[temp_task_id]
+                        except Exception:
+                            pass
+                    if background_job_started:
+                        self._finish_background_screen_job()
+                    if not self.auto_tasks and not getattr(self, "temporary_tasks", {}):
+                        self.state = current_state
+
+            if not hasattr(self, "temporary_tasks") or self.temporary_tasks is None:
+                self.temporary_tasks = {}
+            self.temporary_tasks[temp_task_id] = asyncio.create_task(temp_mic_task())
+            logger.info(f"已创建远程麦克风临时任务: {temp_task_id}")
+        except Exception as e:
+            logger.error(f"创建远程麦克风临时任务失败: {e}")
+
     def _ensure_mic_monitor_background_task(self) -> None:
         self._ensure_runtime_state()
+        # Remote mode receives mic volume from desktop client; skip local pyaudio loop.
+        try:
+            if bool(self._get_runtime_flag("remote_mode") if hasattr(self, "_get_runtime_flag") else getattr(self, "remote_mode", False)):
+                self._stop_mic_monitor_background_task()
+                return
+        except Exception:
+            pass
         task = getattr(self, "_mic_monitor_background_task", None)
         if task and not task.done():
             return
@@ -2839,48 +2964,16 @@ class ScreenCompanionMediaMixin:
         return True, ""
 
     def _check_env(self, check_mic=False):
-        """Check whether the desktop environment is available.
+        """Check whether the desktop/remote capture environment is available.
 
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
-        dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
-        if not dep_ok:
-            return False, dep_msg
-
+        # Route through mode-aware helpers so remote_mode skips local DISPLAY/pyautogui.
         if self._use_screen_recording_mode():
-            if not self._is_recording_platform_supported():
-                return False, self._unsupported_recording_platform_message()
-            ffmpeg_path = self._get_ffmpeg_path()
-            if not ffmpeg_path:
-                return (
-                    False,
-                    self._get_ffmpeg_missing_message()
-                )
-            return True, ""
+            return self._check_recording_env(check_mic=check_mic)
+        return self._check_screenshot_env(check_mic=check_mic)
 
-        try:
-            import pyautogui
-
-            # 检查 Linux 下的 Display 环境变量
-            if sys.platform.startswith("linux"):
-                import os
-
-                if not os.environ.get("DISPLAY") and not os.environ.get(
-                    "WAYLAND_DISPLAY"
-                ):
-                    return (
-                        False,
-                        "Detected Linux without an available graphical display. Please run it in a desktop session or with X11 forwarding.",
-                    )
-
-            size = pyautogui.size()
-            if size[0] <= 0 or size[1] <= 0:
-                return False, "Unable to capture the screen properly."
-
-            return True, ""
-        except Exception as e:
-            return False, f"自我检查失败: {str(e)}"
 
     async def _get_persona_prompt(self, umo: str = None) -> str:
         """获取屏幕伴侣的系统提示词"""

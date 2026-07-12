@@ -640,7 +640,30 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._remote_receiver = RemoteScreenReceiver(
             port=min(65535, max(1, int(getattr(self, "remote_ws_port", 6315) or 6315))),
             auth_token=str(getattr(self, "remote_auth_token", "") or ""),
+            on_input_stats=self._on_remote_input_stats,
+            on_mic_volume=self._on_remote_mic_volume,
         )
+
+    def _on_remote_input_stats(self, payload: dict) -> None:
+        if not bool(getattr(self, "enable_input_stats", False)):
+            return
+        try:
+            applied = self._ingest_remote_input_stats(payload)
+            logger.info(
+                "远程输入统计已入账: keys=%s clicks=%s scroll=%s moves=%s",
+                applied.get("keys", 0),
+                applied.get("clicks", 0),
+                applied.get("scroll_steps", 0),
+                applied.get("moves", 0),
+            )
+        except Exception as e:
+            logger.warning(f"远程输入统计入账失败: {e}")
+
+    def _on_remote_mic_volume(self, volume: int, payload: dict | None = None) -> None:
+        try:
+            self._apply_remote_mic_volume(volume, payload if isinstance(payload, dict) else {})
+        except Exception as e:
+            logger.warning(f"远程麦克风音量处理失败: {e}")
 
     async def _sync_remote_receiver_runtime(self) -> None:
         enabled = self._get_runtime_flag("remote_mode")
@@ -672,6 +695,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         receiver = RemoteScreenReceiver(
             port=desired_port,
             auth_token=desired_token,
+            on_input_stats=self._on_remote_input_stats,
+            on_mic_volume=self._on_remote_mic_volume,
         )
         self._remote_receiver = receiver
         await receiver.start()
