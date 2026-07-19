@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import time
+from contextvars import ContextVar
 from typing import Any
 
 DEFAULT_SYSTEM_PROMPT = """
@@ -35,6 +36,10 @@ from .core.input_stats import ScreenCompanionInputStatsMixin
 from .core.command_support import ScreenCompanionCommandSupportMixin
 
 _screen_companion_tool_plugin = None
+_screen_companion_current_tool_event: ContextVar[AstrMessageEvent | None] = ContextVar(
+    "screen_companion_current_tool_event",
+    default=None,
+)
 
 
 def admin_required(func):
@@ -84,13 +89,18 @@ def _get_tool_event(context: Any) -> AstrMessageEvent | None:
         return None
 
 
+def _resolve_tool_event(context: Any) -> AstrMessageEvent | None:
+    """Resolve a tool event, including the per-task hook fallback."""
+    return _get_tool_event(context) or _screen_companion_current_tool_event.get()
+
+
 async def _ensure_tool_admin_permission(
     plugin: Any,
     context: Any,
     *,
     tool_name: str,
 ) -> tuple[bool, str]:
-    event = _get_tool_event(context)
+    event = _resolve_tool_event(context)
     if event is None:
         logger.warning(
             "拒绝执行 LLM 工具 %s：未获得事件上下文，按安全策略默认拒绝。",
@@ -180,7 +190,7 @@ class ScreenPeekTool(FunctionTool[AstrAgentContext]):
             return denial_message
 
         question = str(kwargs.get("question", "") or "").strip()
-        event = _get_tool_event(context)
+        event = _resolve_tool_event(context)
         try:
             capture_context = await plugin._capture_recognition_context()
             active_window_title = str(capture_context.get("active_window_title", "") or "")
@@ -397,6 +407,31 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
     GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
     GEMINI_FILE_POLL_TIMEOUT_SECONDS = 120
     GEMINI_FILE_POLL_INTERVAL_SECONDS = 2
+
+    @filter.on_using_llm_tool()
+    async def bind_screen_tool_event(
+        self,
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: dict[str, Any] | None,
+    ) -> None:
+        """Keep the real event available when a runner strips tool context."""
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        if tool_name in {"screen_peek", "screen_usage_context"}:
+            _screen_companion_current_tool_event.set(event)
+
+    @filter.on_llm_tool_respond()
+    async def clear_screen_tool_event(
+        self,
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: dict[str, Any] | None,
+        tool_result: Any,
+    ) -> None:
+        """Clear the task-local event after a screen tool has returned."""
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        if tool_name in {"screen_peek", "screen_usage_context"}:
+            _screen_companion_current_tool_event.set(None)
 
     def __init__(self, context: Context, config: dict):
         import os
@@ -640,30 +675,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self._remote_receiver = RemoteScreenReceiver(
             port=min(65535, max(1, int(getattr(self, "remote_ws_port", 6315) or 6315))),
             auth_token=str(getattr(self, "remote_auth_token", "") or ""),
-            on_input_stats=self._on_remote_input_stats,
-            on_mic_volume=self._on_remote_mic_volume,
         )
-
-    def _on_remote_input_stats(self, payload: dict) -> None:
-        if not bool(getattr(self, "enable_input_stats", False)):
-            return
-        try:
-            applied = self._ingest_remote_input_stats(payload)
-            logger.info(
-                "远程输入统计已入账: keys=%s clicks=%s scroll=%s moves=%s",
-                applied.get("keys", 0),
-                applied.get("clicks", 0),
-                applied.get("scroll_steps", 0),
-                applied.get("moves", 0),
-            )
-        except Exception as e:
-            logger.warning(f"远程输入统计入账失败: {e}")
-
-    def _on_remote_mic_volume(self, volume: int, payload: dict | None = None) -> None:
-        try:
-            self._apply_remote_mic_volume(volume, payload if isinstance(payload, dict) else {})
-        except Exception as e:
-            logger.warning(f"远程麦克风音量处理失败: {e}")
 
     async def _sync_remote_receiver_runtime(self) -> None:
         enabled = self._get_runtime_flag("remote_mode")
@@ -695,8 +707,6 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         receiver = RemoteScreenReceiver(
             port=desired_port,
             auth_token=desired_token,
-            on_input_stats=self._on_remote_input_stats,
-            on_mic_volume=self._on_remote_mic_volume,
         )
         self._remote_receiver = receiver
         await receiver.start()

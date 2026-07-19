@@ -272,59 +272,6 @@ class ScreenCompanionInputStatsMixin:
             self._input_stats_last_event_at = entry["last_event_at"]
             self._input_stats_dirty = True
 
-    def _ingest_remote_input_stats(self, payload: dict[str, Any] | None) -> dict[str, int]:
-        """Apply one remote client input_stats batch into daily counters."""
-        self._ensure_input_stats_state()
-        data = payload if isinstance(payload, dict) else {}
-        keys = max(0, int(data.get("keys", 0) or 0))
-        clicks = max(0, int(data.get("clicks", 0) or 0))
-        scroll_steps = max(0, int(data.get("scroll_steps", 0) or 0))
-        moves = max(0, int(data.get("moves", 0) or 0))
-        move_pixels = max(0, int(data.get("move_pixels", 0) or 0))
-
-        now_dt = datetime.now()
-        ts_raw = data.get("timestamp")
-        try:
-            ts_val = float(ts_raw)
-            if ts_val > 1e12:
-                ts_val = ts_val / 1000.0
-            if abs(time.time() - ts_val) < 7 * 24 * 3600:
-                now_dt = datetime.fromtimestamp(ts_val)
-        except Exception:
-            pass
-
-        if keys:
-            self._record_input_event("keys", keys, now_dt=now_dt)
-        if clicks:
-            self._record_input_event("clicks", clicks, now_dt=now_dt)
-        if scroll_steps:
-            self._record_input_event("scroll_steps", scroll_steps, now_dt=now_dt)
-        if moves or move_pixels:
-            amount = move_pixels if move_pixels > 0 else max(moves, 1)
-            if moves > 0 and move_pixels <= 0:
-                for _ in range(min(moves, 50)):
-                    self._record_input_event("moves", 1, now_dt=now_dt, count_event=False)
-            else:
-                self._record_input_event("moves", max(amount, 1), now_dt=now_dt, count_event=False)
-                if moves > 1:
-                    for _ in range(min(moves - 1, 49)):
-                        self._record_input_event("moves", 1, now_dt=now_dt, count_event=False)
-
-        if keys or clicks or scroll_steps or moves or move_pixels:
-            self._input_stats_last_event_at = now_dt.isoformat()
-            with self._input_stats_lock:
-                entry = self._get_or_create_input_stats_day(now_dt.strftime("%Y-%m-%d"))
-                entry["last_event_at"] = self._input_stats_last_event_at
-                self._input_stats_dirty = True
-
-        return {
-            "keys": keys,
-            "clicks": clicks,
-            "scroll_steps": scroll_steps,
-            "moves": moves,
-            "move_pixels": move_pixels,
-        }
-
     def _handle_input_key_press(self, _key: Any) -> None:
         self._record_input_event("keys", 1)
 
@@ -445,84 +392,6 @@ class ScreenCompanionInputStatsMixin:
 
     def _get_input_presence_snapshot(self) -> dict[str, Any]:
         self._ensure_input_stats_state()
-
-        # Remote mode cannot observe local keyboard hooks in the container.
-        # Prefer remote screenshot freshness / client connection as presence signal,
-        # otherwise away-auto-pause will immediately suspend after /kps using stale
-        # historical input_stats timestamps.
-        remote_mode = False
-        try:
-            remote_mode = bool(
-                self._get_runtime_flag("remote_mode")
-                if hasattr(self, "_get_runtime_flag")
-                else getattr(self, "remote_mode", False)
-            )
-        except Exception:
-            remote_mode = bool(getattr(self, "remote_mode", False))
-
-        if remote_mode:
-            receiver = getattr(self, "_remote_receiver", None)
-            if receiver is None:
-                return {
-                    "enabled": bool(self.enable_input_stats),
-                    "status": "remote_unavailable",
-                    "detail": "远程模式接收服务未初始化",
-                    "presence_status": "disabled",
-                    "presence_label": "远程在场未知",
-                    "presence_detail": "远程接收服务未初始化，离开自动挂起不会依据本机历史输入统计。",
-                    "idle_seconds": 0,
-                    "idle_label": "",
-                    "latest_event_at": "",
-                }
-
-            clients = len(getattr(receiver, "_connected_clients", set()) or set())
-            has_shot = bool(getattr(receiver, "has_screenshot", False))
-            age = float(getattr(receiver, "latest_age_seconds", float("inf")) or float("inf"))
-            max_age = max(5, int(getattr(self, "remote_screenshot_max_age", 60) or 60))
-            idle_seconds = 0 if age == float("inf") else max(0, int(age))
-            idle_label = self._format_elapsed_seconds(idle_seconds) if idle_seconds > 0 else ""
-
-            if clients > 0 and has_shot and age <= max_age:
-                return {
-                    "enabled": bool(self.enable_input_stats),
-                    "status": "remote_active",
-                    "detail": f"远程客户端在线，最近截图约 {idle_label or '刚刚'}",
-                    "presence_status": "active",
-                    "presence_label": "远程客户端在线",
-                    "presence_detail": (
-                        f"远程客户端已连接且截图新鲜（约 {idle_label or '刚刚'}），"
-                        "按远程在场处理，不使用本机陈旧输入统计。"
-                    ),
-                    "idle_seconds": idle_seconds,
-                    "idle_label": idle_label,
-                    "latest_event_at": "",
-                }
-
-            if clients > 0 and (not has_shot or age > max_age):
-                return {
-                    "enabled": bool(self.enable_input_stats),
-                    "status": "remote_waiting",
-                    "detail": "远程客户端已连接，等待新鲜截图",
-                    "presence_status": "active",
-                    "presence_label": "远程等待截图",
-                    "presence_detail": "远程客户端在线但截图尚未就绪/已过期，暂不触发离开挂起。",
-                    "idle_seconds": idle_seconds if has_shot else 0,
-                    "idle_label": idle_label,
-                    "latest_event_at": "",
-                }
-
-            return {
-                "enabled": bool(self.enable_input_stats),
-                "status": "remote_offline",
-                "detail": "远程客户端未连接",
-                "presence_status": "disabled",
-                "presence_label": "远程客户端离线",
-                "presence_detail": "远程客户端未连接，离开自动挂起已禁用，避免用本机陈旧输入统计误挂起。",
-                "idle_seconds": 0,
-                "idle_label": "",
-                "latest_event_at": "",
-            }
-
         last_event_at = str(getattr(self, "_input_stats_last_event_at", "") or "").strip()
         if not last_event_at:
             last_event_at = self._refresh_input_stats_last_event_at()
@@ -534,6 +403,7 @@ class ScreenCompanionInputStatsMixin:
             **presence,
         }
 
+    @staticmethod
     def _format_move_distance(move_pixels: int | float) -> str:
         pixels = max(0, int(move_pixels or 0))
         if pixels >= 10000:

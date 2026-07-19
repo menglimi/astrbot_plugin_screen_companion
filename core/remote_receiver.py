@@ -26,25 +26,14 @@ class RemoteScreenReceiver:
     MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
     MAX_WEBSOCKET_MESSAGE_BYTES = 14 * 1024 * 1024
 
-    def __init__(
-        self,
-        *,
-        port: int = 6315,
-        auth_token: str = "",
-        on_input_stats=None,
-        on_mic_volume=None,
-    ):
+    def __init__(self, *, port: int = 6315, auth_token: str = ""):
         self.port = min(65535, max(1, int(port or 6315)))
         self.auth_token = str(auth_token or "").strip()
-        self._on_input_stats = on_input_stats
-        self._on_mic_volume = on_mic_volume
         self._server = None
         self._latest_image_bytes: bytes = b""
         self._latest_window_title: str = ""
         self._latest_meta: dict[str, Any] = {}
         self._latest_timestamp: float = 0.0
-        self._latest_mic_volume: int = 0
-        self._latest_mic_timestamp: float = 0.0
         self._connected_clients: set = set()
         self._lock = asyncio.Lock()
 
@@ -69,9 +58,6 @@ class RemoteScreenReceiver:
                 self._latest_window_title,
                 dict(self._latest_meta),
             )
-
-    def get_latest_mic_volume(self) -> tuple[int, float]:
-        return int(self._latest_mic_volume or 0), float(self._latest_mic_timestamp or 0.0)
 
     async def start(self) -> None:
         if self.is_running:
@@ -211,60 +197,6 @@ class RemoteScreenReceiver:
                 self._latest_timestamp = time.time()
             await websocket.send(json.dumps({"status": "screenshot_received"}))
             logger.debug(f"收到 bundle 截图: {len(jpeg_bytes)} bytes")
-            return
-
-        if msg_type in {"input_stats", "input"}:
-            payload = {
-                "keys": max(0, int(data.get("keys", 0) or 0)),
-                "clicks": max(0, int(data.get("clicks", 0) or 0)),
-                "scroll_steps": max(0, int(data.get("scroll_steps", 0) or 0)),
-                "moves": max(0, int(data.get("moves", 0) or 0)),
-                "move_pixels": max(0, int(data.get("move_pixels", 0) or 0)),
-                "window_title": str(data.get("window_title", "") or ""),
-                "timestamp": data.get("timestamp", time.time()),
-                "client_id": str(data.get("client_id", "") or ""),
-            }
-            handler = self._on_input_stats
-            if callable(handler):
-                try:
-                    result = handler(payload)
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception as e:
-                    logger.warning(f"处理远程 input_stats 失败: {e}")
-                    await websocket.send(json.dumps({"error": f"input_stats 处理失败: {e}"}))
-                    return
-            await websocket.send(json.dumps({"status": "input_stats_received"}))
-            logger.debug(
-                "收到远程 input_stats: keys=%s clicks=%s scroll=%s moves=%s",
-                payload["keys"],
-                payload["clicks"],
-                payload["scroll_steps"],
-                payload["moves"],
-            )
-            return
-
-        if msg_type in {"mic_volume", "mic"}:
-            try:
-                volume = int(float(data.get("volume", 0) or 0))
-            except Exception:
-                volume = 0
-            volume = min(100, max(0, volume))
-            async with self._lock:
-                self._latest_mic_volume = volume
-                self._latest_mic_timestamp = time.time()
-            handler = self._on_mic_volume
-            if callable(handler):
-                try:
-                    result = handler(volume, data if isinstance(data, dict) else {})
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception as e:
-                    logger.warning(f"处理远程 mic_volume 失败: {e}")
-                    await websocket.send(json.dumps({"error": f"mic_volume 处理失败: {e}"}))
-                    return
-            await websocket.send(json.dumps({"status": "mic_volume_received", "volume": volume}))
-            logger.debug("收到远程 mic_volume: %s", volume)
             return
 
         await websocket.send(json.dumps({"error": f"未知消息类型: {msg_type}"}))
