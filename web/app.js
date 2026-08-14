@@ -17,6 +17,7 @@ const state = {
     runtime: null,
     health: null,
     diaryObservationsExpanded: false,
+    diaryDeleteRequest: null,
     settingsSchema: {},
     settingsValues: {},
     settingsSnapshot: {},
@@ -62,6 +63,10 @@ const elements = {
     clearDiarySelectionsButton: document.getElementById("clearDiarySelectionsButton"),
     deleteSelectedDiariesButton: document.getElementById("deleteSelectedDiariesButton"),
     deleteCurrentDiaryButton: document.getElementById("deleteCurrentDiaryButton"),
+    diaryDeleteConfirmation: document.getElementById("diaryDeleteConfirmation"),
+    diaryDeleteConfirmationMessage: document.getElementById("diaryDeleteConfirmationMessage"),
+    diaryDeleteConfirmationCancel: document.getElementById("diaryDeleteConfirmationCancel"),
+    diaryDeleteConfirmationConfirm: document.getElementById("diaryDeleteConfirmationConfirm"),
     observationList: document.getElementById("observationList"),
     observationMeta: document.getElementById("observationMeta"),
     observationPagination: document.getElementById("observationPagination"),
@@ -227,10 +232,17 @@ async function apiFetch(url, options = {}) {
             }
         }
         try {
+            let payload;
             if (method === "GET") {
-                return await bridge.apiGet(endpoint, Object.keys(params).length ? params : undefined);
+                payload = await bridge.apiGet(endpoint, Object.keys(params).length ? params : undefined);
+            } else {
+                payload = await bridge.apiPost(endpoint, body || {});
             }
-            return await bridge.apiPost(endpoint, body || {});
+            const status = String(payload?.status || "").trim().toLowerCase();
+            if (payload?.success === false || payload?.ok === false || ["error", "fail", "failed"].includes(status)) {
+                throw new Error(payload?.error || payload?.message || `请求失败 (${method} ${endpoint})`);
+            }
+            return payload;
         } catch (error) {
             const message = error?.message || `请求失败 (${method} ${endpoint})`;
             throw new Error(`${message} @ ${endpoint}`);
@@ -2139,6 +2151,74 @@ function buildDiaryDeleteConfirmMessage(dates) {
     return `确定批量删除这 ${validDates.length} 篇日记吗？\n${preview}${suffix}\n对应正文和概览摘要会一起删除，且无法恢复。`;
 }
 
+function buildDiaryDeleteResultMessage(message, result) {
+    if (result?.refreshOk !== false) return message;
+    return `${String(message || "日记已删除").replace(/[。.]$/, "")}，但页面没有完全刷新，请点“刷新数据”同步。`;
+}
+
+function hideDiaryDeleteConfirmation() {
+    state.diaryDeleteRequest = null;
+    const panel = elements.diaryDeleteConfirmation;
+    if (!panel) return;
+    panel.hidden = true;
+    panel.classList.add("hidden");
+    panel.setAttribute("aria-hidden", "true");
+    panel.removeAttribute("aria-busy");
+    if (elements.diaryDeleteConfirmationMessage) {
+        elements.diaryDeleteConfirmationMessage.textContent = "";
+    }
+    if (elements.diaryDeleteConfirmationCancel) {
+        elements.diaryDeleteConfirmationCancel.disabled = false;
+    }
+    if (elements.diaryDeleteConfirmationConfirm) {
+        elements.diaryDeleteConfirmationConfirm.disabled = false;
+        elements.diaryDeleteConfirmationConfirm.textContent = "确认删除";
+    }
+}
+
+function showDiaryDeleteConfirmation(dates, action) {
+    const validDates = (dates || []).filter(Boolean);
+    const panel = elements.diaryDeleteConfirmation;
+    if (!validDates.length || typeof action !== "function") return;
+    if (!panel || !elements.diaryDeleteConfirmationMessage) {
+        elements.diarySelectionMeta.textContent = "删除确认界面暂时不可用，请刷新页面后再试。";
+        return;
+    }
+
+    state.diaryDeleteRequest = { dates: validDates, action };
+    elements.diaryDeleteConfirmationMessage.textContent = buildDiaryDeleteConfirmMessage(validDates);
+    panel.hidden = false;
+    panel.classList.remove("hidden");
+    panel.setAttribute("aria-hidden", "false");
+    panel.removeAttribute("aria-busy");
+    elements.diaryDeleteConfirmationCancel.disabled = false;
+    elements.diaryDeleteConfirmationConfirm.disabled = false;
+    elements.diaryDeleteConfirmationConfirm.textContent = "确认删除";
+    window.setTimeout(() => {
+        if (state.diaryDeleteRequest?.action !== action || panel.hidden) return;
+        panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        elements.diaryDeleteConfirmationCancel.focus();
+    }, 0);
+}
+
+async function confirmDiaryDelete() {
+    const request = state.diaryDeleteRequest;
+    const panel = elements.diaryDeleteConfirmation;
+    if (!request || !panel || panel.hidden) return;
+
+    panel.setAttribute("aria-busy", "true");
+    elements.diaryDeleteConfirmationCancel.disabled = true;
+    elements.diaryDeleteConfirmationConfirm.disabled = true;
+    elements.diaryDeleteConfirmationConfirm.textContent = "删除中...";
+    try {
+        await request.action();
+        hideDiaryDeleteConfirmation();
+    } catch (error) {
+        hideDiaryDeleteConfirmation();
+        elements.diarySelectionMeta.textContent = `删除失败: ${error?.message || "请稍后再试。"}`;
+    }
+}
+
 function syncDiarySelectionUi() {
     const total = state.diaryDates.length;
     const selectedCount = state.selectedDiaryDates.size;
@@ -2196,6 +2276,7 @@ function renderDiaryList() {
         `;
         const checkbox = card.querySelector('input[type="checkbox"]');
         checkbox.addEventListener("change", () => {
+            hideDiaryDeleteConfirmation();
             if (checkbox.checked) state.selectedDiaryDates.add(entry.date);
             else state.selectedDiaryDates.delete(entry.date);
             syncDiarySelectionUi();
@@ -2203,22 +2284,26 @@ function renderDiaryList() {
 
         const openButton = card.querySelector(".diary-open-button");
         openButton.addEventListener("click", () => {
+            hideDiaryDeleteConfirmation();
             elements.diaryDateInput.value = entry.date;
             loadDiaryDetail(entry.date);
         });
 
         const deleteButton = card.querySelector(".diary-delete-button");
-        deleteButton.addEventListener("click", async () => {
-            const confirmed = confirm(buildDiaryDeleteConfirmMessage([entry.date]));
-            if (!confirmed) return;
-            deleteButton.disabled = true;
-            try {
-                await deleteDiary(entry.date);
-                elements.diarySelectionMeta.textContent = `已删除 ${formatDateLabel(entry.date)} 的日记。`;
-            } catch (error) {
-                deleteButton.disabled = false;
-                elements.diarySelectionMeta.textContent = `删除失败: ${error.message}`;
-            }
+        deleteButton.addEventListener("click", () => {
+            showDiaryDeleteConfirmation([entry.date], async () => {
+                deleteButton.disabled = true;
+                try {
+                    const result = await deleteDiary(entry.date);
+                    elements.diarySelectionMeta.textContent = buildDiaryDeleteResultMessage(
+                        `已删除 ${formatDateLabel(entry.date)} 的日记。`,
+                        result
+                    );
+                } catch (error) {
+                    deleteButton.disabled = false;
+                    throw error;
+                }
+            });
         });
 
         elements.diaryList.appendChild(card);
@@ -2415,16 +2500,28 @@ async function deleteObservation(index) {
     updateSummaryCards();
 }
 
+async function refreshAfterDiaryDelete(fallbackDate) {
+    const results = await Promise.allSettled([
+        loadRuntime(),
+        loadDiaries(fallbackDate),
+    ]);
+    updateSummaryCards();
+    const failures = results.filter((result) => result.status === "rejected");
+    return {
+        refreshOk: failures.length === 0,
+        refreshError: failures.map((result) => result.reason?.message || "刷新失败").join("；"),
+    };
+}
+
 async function deleteDiary(date) {
-    await apiFetch(`/api/diary/${date}`, { method: "DELETE" });
+    const data = await apiFetch(`/api/diary/${encodeURIComponent(date)}`, { method: "DELETE" });
     state.selectedDiaryDates.delete(date);
     const fallbackDate = pickDiaryFallbackDate([date]);
     if (state.selectedDiaryDate === date) {
         state.selectedDiaryDate = fallbackDate;
     }
-    await loadRuntime();
-    await loadDiaries(fallbackDate);
-    updateSummaryCards();
+    const refresh = await refreshAfterDiaryDelete(fallbackDate);
+    return { ...data, ...refresh };
 }
 
 async function deleteSelectedDiaries() {
@@ -2437,12 +2534,11 @@ async function deleteSelectedDiaries() {
     });
     dates.forEach((date) => state.selectedDiaryDates.delete(date));
     state.selectedDiaryDate = fallbackDate;
-    await loadRuntime();
-    await loadDiaries(fallbackDate);
-    updateSummaryCards();
+    const refresh = await refreshAfterDiaryDelete(fallbackDate);
     return {
         deletedCount: Number(data.deleted_count || 0),
         deletedDates: Array.isArray(data.deleted_dates) ? data.deleted_dates : [],
+        ...refresh,
     };
 }
 
@@ -2734,7 +2830,7 @@ async function loadDiaryDetail(date) {
     elements.diaryTitle.textContent = "正在载入日记...";
     renderLoading(elements.diaryReflection, "正在读取日记内容...");
     renderLoading(elements.diaryObservations, "正在整理观察记录...");
-    const data = await apiFetch(`/api/diary/${date}`);
+    const data = await apiFetch(`/api/diary/${encodeURIComponent(date)}`);
     renderDiaryDetail(data.date, data.content || "", data.structured_summary || {});
 }
 
@@ -3036,10 +3132,12 @@ elements.refreshButton.addEventListener("click", async () => {
 });
 
 elements.diaryDateInput.addEventListener("change", async () => {
+    hideDiaryDeleteConfirmation();
     if (elements.diaryDateInput.value) await loadDiaryDetail(elements.diaryDateInput.value);
 });
 
 elements.selectAllDiaries.addEventListener("change", () => {
+    hideDiaryDeleteConfirmation();
     if (elements.selectAllDiaries.checked) {
         state.diaryDates.forEach((entry) => state.selectedDiaryDates.add(entry.date));
     } else {
@@ -3049,8 +3147,18 @@ elements.selectAllDiaries.addEventListener("change", () => {
 });
 
 elements.clearDiarySelectionsButton.addEventListener("click", () => {
+    hideDiaryDeleteConfirmation();
     state.selectedDiaryDates.clear();
     renderDiaryList();
+});
+
+elements.diaryDeleteConfirmationCancel?.addEventListener("click", () => {
+    hideDiaryDeleteConfirmation();
+    elements.diarySelectionMeta.textContent = "已取消删除。";
+});
+
+elements.diaryDeleteConfirmationConfirm?.addEventListener("click", () => {
+    void confirmDiaryDelete();
 });
 
 elements.deleteSelectedDiariesButton.addEventListener("click", async () => {
@@ -3059,16 +3167,13 @@ elements.deleteSelectedDiariesButton.addEventListener("click", async () => {
         elements.diarySelectionMeta.textContent = "请先选择要删除的日记。";
         return;
     }
-    const confirmed = confirm(buildDiaryDeleteConfirmMessage(dates));
-    if (!confirmed) return;
-    try {
+    showDiaryDeleteConfirmation(dates, async () => {
         const result = await deleteSelectedDiaries();
-        elements.diarySelectionMeta.textContent = result.deletedCount > 0
+        const message = result.deletedCount > 0
             ? `已删除 ${result.deletedCount} 篇日记。`
             : "没有找到可删除的日记。";
-    } catch (error) {
-        elements.diarySelectionMeta.textContent = `批量删除失败: ${error.message}`;
-    }
+        elements.diarySelectionMeta.textContent = buildDiaryDeleteResultMessage(message, result);
+    });
 });
 
 elements.deleteCurrentDiaryButton.addEventListener("click", async () => {
@@ -3078,17 +3183,20 @@ elements.deleteCurrentDiaryButton.addEventListener("click", async () => {
         return;
     }
     const targetDate = state.selectedDiaryDate;
-    const confirmed = confirm(buildDiaryDeleteConfirmMessage([targetDate]));
-    if (!confirmed) return;
-    const originalDisabled = elements.deleteCurrentDiaryButton.disabled;
-    elements.deleteCurrentDiaryButton.disabled = true;
-    try {
-        await deleteDiary(targetDate);
-        elements.diarySelectionMeta.textContent = `已删除 ${formatDateLabel(targetDate)} 的日记。`;
-    } catch (error) {
-        elements.deleteCurrentDiaryButton.disabled = originalDisabled;
-        elements.diarySelectionMeta.textContent = `删除失败: ${error.message}`;
-    }
+    showDiaryDeleteConfirmation([targetDate], async () => {
+        const originalDisabled = elements.deleteCurrentDiaryButton.disabled;
+        elements.deleteCurrentDiaryButton.disabled = true;
+        try {
+            const result = await deleteDiary(targetDate);
+            elements.diarySelectionMeta.textContent = buildDiaryDeleteResultMessage(
+                `已删除 ${formatDateLabel(targetDate)} 的日记。`,
+                result
+            );
+        } catch (error) {
+            elements.deleteCurrentDiaryButton.disabled = originalDisabled;
+            throw error;
+        }
+    });
 });
 
 elements.toggleDiaryObservations.addEventListener("click", () => {

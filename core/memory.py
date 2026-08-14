@@ -4684,6 +4684,9 @@ class ScreenCompanionMemoryMixin:
                 "last_reply_scene": "",
                 "last_reply_preview": "",
                 "last_skip_reason": "",
+                "last_termination_reason": "",
+                "last_ended_at": 0.0,
+                "restart_count": 0,
             }
             runtime[normalized_task_id] = state
         return state

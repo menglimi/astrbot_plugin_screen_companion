@@ -24,6 +24,8 @@ class RemoteScreenReceiver:
     """Receive screenshots from a remote desktop client over WebSocket."""
 
     MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+    MAX_VIDEO_BYTES = 100 * 1024 * 1024
+    MAX_VIDEO_CHUNK_BYTES = 5 * 1024 * 1024
     MAX_WEBSOCKET_MESSAGE_BYTES = 14 * 1024 * 1024
 
     def __init__(self, *, port: int = 6315, auth_token: str = ""):
@@ -34,6 +36,9 @@ class RemoteScreenReceiver:
         self._latest_window_title: str = ""
         self._latest_meta: dict[str, Any] = {}
         self._latest_timestamp: float = 0.0
+        self._latest_video_bytes: bytes = b""
+        self._latest_video_meta: dict[str, Any] = {}
+        self._video_uploads: dict[str, dict[str, Any]] = {}
         self._connected_clients: set = set()
         self._lock = asyncio.Lock()
 
@@ -51,6 +56,13 @@ class RemoteScreenReceiver:
             return float("inf")
         return time.time() - self._latest_timestamp
 
+    @property
+    def latest_video_age_seconds(self) -> float:
+        completed_at = float(self._latest_video_meta.get("completed_at", 0.0) or 0.0)
+        if completed_at <= 0:
+            return float("inf")
+        return time.time() - completed_at
+
     async def get_latest_screenshot(self) -> tuple[bytes, str, dict[str, Any]]:
         async with self._lock:
             return (
@@ -58,6 +70,11 @@ class RemoteScreenReceiver:
                 self._latest_window_title,
                 dict(self._latest_meta),
             )
+
+    async def get_latest_video(self) -> tuple[bytes, dict[str, Any]]:
+        """Return the most recently completed remote video upload."""
+        async with self._lock:
+            return self._latest_video_bytes, dict(self._latest_video_meta)
 
     async def start(self) -> None:
         if self.is_running:
@@ -131,6 +148,7 @@ class RemoteScreenReceiver:
             async with self._lock:
                 self._latest_image_bytes = message
                 self._latest_timestamp = time.time()
+            await websocket.send(json.dumps({"status": "binary_screenshot_received"}))
             logger.debug(f"收到截图: {len(message)} bytes")
             return
 
@@ -164,6 +182,100 @@ class RemoteScreenReceiver:
 
         if msg_type == "ping":
             await websocket.send(json.dumps({"type": "pong", "ts": time.time()}))
+            return
+
+        if msg_type == "video_meta":
+            upload_id = str(data.get("upload_id", "") or "").strip()
+            try:
+                total_size = int(data.get("total_size", 0) or 0)
+            except (TypeError, ValueError):
+                total_size = 0
+            if not upload_id or total_size <= 0:
+                await websocket.send(json.dumps({"error": "video_meta 缺少有效 upload_id 或 total_size"}))
+                return
+            if total_size > self.MAX_VIDEO_BYTES:
+                await websocket.send(json.dumps({"error": "视频超过 100 MiB 限制"}))
+                return
+            async with self._lock:
+                now = time.time()
+                self._video_uploads = {
+                    key: value
+                    for key, value in self._video_uploads.items()
+                    if now - float(value.get("created_at", now) or now) < 300
+                }
+                if len(self._video_uploads) >= 4 and upload_id not in self._video_uploads:
+                    await websocket.send(json.dumps({"error": "同时进行的视频上传过多"}))
+                    return
+                self._video_uploads[upload_id] = {
+                    "chunks": {},
+                    "total_size": total_size,
+                    "received_size": 0,
+                    "created_at": now,
+                    "meta": {
+                        "upload_id": upload_id,
+                        "mime_type": str(data.get("mime_type", "video/mp4") or "video/mp4"),
+                        "window_title": str(data.get("window_title", "") or ""),
+                        "client_id": str(data.get("client_id", "") or ""),
+                        "timestamp": data.get("timestamp", time.time()),
+                    },
+                }
+            await websocket.send(json.dumps({"status": "video_ready", "upload_id": upload_id}))
+            return
+
+        if msg_type == "video_chunk":
+            upload_id = str(data.get("upload_id", "") or "").strip()
+            try:
+                chunk_index = int(data.get("index", 0))
+            except (TypeError, ValueError):
+                chunk_index = -1
+            encoded_chunk = str(data.get("data", "") or "")
+            if not upload_id or chunk_index < 0 or not encoded_chunk:
+                await websocket.send(json.dumps({"error": "video_chunk 字段无效"}))
+                return
+            try:
+                chunk = base64.b64decode(encoded_chunk, validate=True)
+            except (binascii.Error, ValueError, TypeError):
+                await websocket.send(json.dumps({"error": "video_chunk 不是有效的 base64"}))
+                return
+            if not chunk or len(chunk) > self.MAX_VIDEO_CHUNK_BYTES:
+                await websocket.send(json.dumps({"error": "视频分块大小无效"}))
+                return
+            async with self._lock:
+                upload = self._video_uploads.get(upload_id)
+                if upload is None:
+                    await websocket.send(json.dumps({"error": "未知 upload_id"}))
+                    return
+                if chunk_index not in upload["chunks"]:
+                    upload["chunks"][chunk_index] = chunk
+                    upload["received_size"] += len(chunk)
+                if upload["received_size"] > upload["total_size"]:
+                    self._video_uploads.pop(upload_id, None)
+                    await websocket.send(json.dumps({"error": "视频分块总大小超出声明值"}))
+                    return
+            await websocket.send(json.dumps({"status": "video_chunk_received", "index": chunk_index}))
+            return
+
+        if msg_type == "video_complete":
+            upload_id = str(data.get("upload_id", "") or "").strip()
+            async with self._lock:
+                upload = self._video_uploads.pop(upload_id, None)
+                if upload is None:
+                    await websocket.send(json.dumps({"error": "未知 upload_id"}))
+                    return
+                chunks = upload["chunks"]
+                expected_size = upload["total_size"]
+                if upload["received_size"] != expected_size or not chunks:
+                    await websocket.send(json.dumps({"error": "视频分块不完整"}))
+                    return
+                video_bytes = b"".join(chunks[index] for index in sorted(chunks))
+                if len(video_bytes) != expected_size:
+                    await websocket.send(json.dumps({"error": "视频分块顺序或大小不匹配"}))
+                    return
+                self._latest_video_bytes = video_bytes
+                self._latest_video_meta = dict(upload["meta"])
+                self._latest_video_meta["completed_at"] = time.time()
+            await websocket.send(json.dumps({"status": "video_complete", "upload_id": upload_id}))
+            logger.debug(f"收到远程录屏: {len(video_bytes)} bytes")
             return
 
         if msg_type == "screenshot_bundle":

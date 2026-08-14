@@ -101,8 +101,6 @@ class ScreenCompanionRuntimeMixin:
         return self.SCREENSHOT_MODE
 
     def _use_screen_recording_mode(self) -> bool:
-        if self._coerce_bool(getattr(self, "remote_mode", False)):
-            return False
         return (
             self._normalize_screen_recognition_mode(
                 getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
@@ -170,6 +168,11 @@ class ScreenCompanionRuntimeMixin:
 
     async def _handle_screen_recognition_mode_change(self) -> None:
         self._ensure_runtime_state()
+        if self._get_runtime_flag("remote_mode"):
+            # Remote recording is supplied by the desktop client; never start
+            # a second ffmpeg capture process on the server.
+            await self._stop_recording_if_running()
+            return
         if self._use_screen_recording_mode():
             await self._ensure_recording_ready()
             return
@@ -278,6 +281,10 @@ class ScreenCompanionRuntimeMixin:
             self._input_stats_last_event_at = ""
         if not hasattr(self, "_away_pause_runtime_state") or self._away_pause_runtime_state is None:
             self._away_pause_runtime_state = {}
+        if not hasattr(self, "_auto_screen_restart_tasks") or self._auto_screen_restart_tasks is None:
+            self._auto_screen_restart_tasks = {}
+        if not hasattr(self, "_auto_screen_restart_history") or self._auto_screen_restart_history is None:
+            self._auto_screen_restart_history = {}
         self._ensure_recording_runtime_state()
 
     def _ensure_recording_runtime_state(self) -> None:

@@ -171,7 +171,7 @@
   "screen_recognition_mode": {
     "description": "开启视频识别",
     "type": "bool",
-    "hint": "开启后用短录屏识别；关闭后只看当前截图。录屏更适合连续操作。",
+    "hint": "开启后用短录屏识别；关闭后只看当前截图。remote_mode 下会读取客户端上传的录屏。",
     "default": false,
     "condition": {
       "enabled": true
@@ -267,22 +267,20 @@
     "description": "视觉识别模型提供商",
     "type": "string",
     "default": "",
-    "hint": "选填。开启视觉 provider 两段链路后建议填写；不填时会继续走兼容兜底逻辑。",
+    "hint": "选填。用于屏幕图片识别；开启外部视觉时作为视觉 provider，关闭外部视觉时也会先用它转述画面，再交给当前主模型回复。",
     "_special": "select_provider",
     "condition": {
-      "enabled": true,
-      "use_external_vision": true
+      "enabled": true
     }
   },
   "vision_provider_id_backup": {
     "description": "备用视觉模型提供商",
     "type": "string",
     "default": "",
-    "hint": "选填，可留空。主 provider 失败时回退到这里。",
+    "hint": "选填，可留空。主视觉 provider 失败时回退到这里。",
     "_special": "select_provider",
     "condition": {
-      "enabled": true,
-      "use_external_vision": true
+      "enabled": true
     }
   },
   "enable_privacy_guard": {
@@ -308,7 +306,16 @@
   "use_llm_for_start_end": {
     "description": "使用 LLM 回复开始和结束消息",
     "type": "bool",
-    "hint": "开启后，开始/结束观察时自动生成一句话；关闭则使用固定文案。",
+    "hint": "开启后，开始/结束观察时自动生成一句话；关闭则使用固定文案。是否发送由“发送开始/结束提醒”控制。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "enable_start_end_messages": {
+    "description": "发送开始/结束提醒",
+    "type": "bool",
+    "hint": "关闭后，启动、停止、自动挂起和窗口陪伴切换时不再发送提醒消息。",
     "default": true,
     "condition": {
       "enabled": true
@@ -321,6 +328,7 @@
     "default": "知道啦~我会时不时过来看一眼的",
     "condition": {
       "enabled": true,
+      "enable_start_end_messages": true,
       "use_llm_for_start_end": false
     }
   },
@@ -331,6 +339,7 @@
     "default": "好啦，我不看了～下次再陪你玩！",
     "condition": {
       "enabled": true,
+      "enable_start_end_messages": true,
       "use_llm_for_start_end": false
     }
   },
@@ -343,6 +352,7 @@
     "editor_language": "text",
     "condition": {
       "enabled": true,
+      "enable_start_end_messages": true,
       "use_llm_for_start_end": true
     }
   },
@@ -355,6 +365,7 @@
     "editor_language": "text",
     "condition": {
       "enabled": true,
+      "enable_start_end_messages": true,
       "use_llm_for_start_end": true
     }
   },
@@ -685,7 +696,7 @@
   "remote_mode": {
     "description": "远程识屏模式",
     "type": "bool",
-    "hint": "开启后，插件不再本地截图，而是通过 WebSocket 接收客户端推送的截图。适用于云服务器加本地客户端架构。",
+    "hint": "开启后，插件不再本地截图，而是通过 WebSocket 接收客户端推送的截图；开启视频识别时也会接收客户端上传的录屏。",
     "default": false
   },
   "remote_ws_port": {

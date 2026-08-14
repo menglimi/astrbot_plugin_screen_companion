@@ -810,6 +810,46 @@ button[disabled] {
     margin: 12px 0 0;
 }
 
+.diary-delete-confirmation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    margin-top: 12px;
+    padding: 13px 14px;
+    border: 1px solid rgba(182, 70, 47, 0.2);
+    border-radius: 16px;
+    background: rgba(255, 244, 240, 0.82);
+}
+
+.diary-delete-confirmation[aria-busy="true"] {
+    opacity: 0.78;
+}
+
+.diary-delete-confirmation-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+}
+
+.diary-delete-confirmation-copy strong {
+    color: var(--text);
+}
+
+.diary-delete-confirmation-copy span {
+    color: var(--muted);
+    white-space: pre-line;
+    line-height: 1.5;
+}
+
+.diary-delete-confirmation-actions {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
 #diaryList {
     max-height: 720px;
     overflow: auto;
@@ -1335,6 +1375,21 @@ button[disabled] {
     .runtime-stats,
     .control-form {
         grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .diary-delete-confirmation {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .diary-delete-confirmation-actions {
+        justify-content: stretch;
+    }
+
+    .diary-delete-confirmation-actions button {
+        flex: 1 1 0;
     }
 }
 

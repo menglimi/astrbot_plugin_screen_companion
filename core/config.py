@@ -75,6 +75,7 @@ class PluginConfig(BaseModel):
     vision_api_model_backup: str = ""
     enable_privacy_guard: bool = True
     user_preferences: str = "游戏 专业的游戏高手，指导玩家提升水平"
+    enable_start_end_messages: bool = True  # 是否发送自动观察开始/结束提醒
     use_llm_for_start_end: bool = True  # 是否使用LLM回复开始和结束消息
     start_preset: str = "知道啦~我会时不时过来看一眼的"
     end_preset: str = "好啦，我不看了～下次再陪你玩！"
@@ -417,6 +418,7 @@ class PluginConfig(BaseModel):
         # 2. 保存 AstrBotConfig 引用以便回写
         object.__setattr__(self, "_data", config)
         object.__setattr__(self, "_plugin_name", "astrbot_plugin_screen_companion")
+        object.__setattr__(self, "_last_save_error", "")
 
         # 3. 初始化路径和目录
         data_dir = StarTools.get_data_dir(self._plugin_name)
@@ -444,7 +446,13 @@ class PluginConfig(BaseModel):
     def save_webui_config(self) -> None:
         """保存 WebUI 配置。"""
         if hasattr(self, "_data") and hasattr(self._data, "save_config"):
-            self._data.save_config({"webui": self.webui.model_dump()})
+            try:
+                self._data.save_config({"webui": self.webui.model_dump(mode="json")})
+                object.__setattr__(self, "_last_save_error", "")
+            except Exception as e:
+                object.__setattr__(self, "_last_save_error", str(e))
+                logger.error(f"[Config] 保存 WebUI 配置失败: {e}", exc_info=True)
+                raise
 
     def __setattr__(self, key: str, value: Any):
         # 更新 Pydantic 模型
@@ -467,11 +475,13 @@ class PluginConfig(BaseModel):
                     # 但如果是修改 webui.port，不会触发这里的 __setattr__
                     # 需要手动调用 save_webui_config
                     if key == "webui" and isinstance(value, WebuiConfig):
-                        self._data.save_config({key: value.model_dump()})
+                        self._data.save_config({key: value.model_dump(mode="json")})
                     else:
                         self._data.save_config({key: value})
-                except Exception:
-                    pass
+                    object.__setattr__(self, "_last_save_error", "")
+                except Exception as e:
+                    object.__setattr__(self, "_last_save_error", str(e))
+                    logger.error(f"[Config] 保存配置项 {key} 失败: {e}", exc_info=True)
             elif isinstance(self._data, dict):
                 self._data[key] = value
 
@@ -485,11 +495,38 @@ class PluginConfig(BaseModel):
             if hasattr(self, "_data") and self._data is not None:
                 if hasattr(self._data, "save_config"):
                     self._data.save_config(updates)
+                    object.__setattr__(self, "_last_save_error", "")
                 elif isinstance(self._data, dict):
                     self._data.update(updates)
             return True
         except Exception as e:
+            object.__setattr__(self, "_last_save_error", str(e))
             logger.error(f"更新配置失败: {e}")
+            return False
+
+    def verify_persisted(self, updates: dict[str, Any]) -> bool:
+        """确认最近一次配置更新已经落到 AstrBot 配置文件。"""
+        data = getattr(self, "_data", None)
+        config_path = getattr(data, "config_path", None)
+        if not config_path:
+            return True
+
+        try:
+            with open(config_path, "r", encoding="utf-8-sig") as file:
+                persisted = json.load(file)
+            for key, value in updates.items():
+                if key == "webui" and isinstance(value, dict):
+                    stored_webui = persisted.get("webui", {})
+                    if not isinstance(stored_webui, dict):
+                        return False
+                    for webui_key, webui_value in value.items():
+                        if stored_webui.get(webui_key) != webui_value:
+                            return False
+                elif persisted.get(key) != value:
+                    return False
+            return True
+        except Exception as e:
+            logger.error(f"[Config] 校验配置持久化失败: {e}", exc_info=True)
             return False
 
     def ensure_base_dirs(self) -> None:

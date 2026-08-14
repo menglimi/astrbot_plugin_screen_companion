@@ -704,7 +704,7 @@ class ScreenCompanionProactiveMixin:
                         "long_notice_sent": False,
                     }
                 )
-                if target:
+                if target and self._start_end_messages_enabled():
                     end_response = await self._get_end_response(target)
                     intro = "看你像是暂时不在电脑前，我先把这边的自动观察挂起。"
                     await self._send_plain_message(target, f"{intro}\n{end_response}".strip())
@@ -734,7 +734,7 @@ class ScreenCompanionProactiveMixin:
                     int(time.time() - float(state.get("started_at", 0.0) or 0.0)),
                 )
                 self._reset_away_pause_runtime_state()
-                if resume_target:
+                if resume_target and self._start_end_messages_enabled():
                     start_response = await self._get_start_response(resume_target)
                     intro = (
                         "看到你回来继续操作了，我把这边的自动观察接上。"
@@ -814,9 +814,10 @@ class ScreenCompanionProactiveMixin:
             )
         )
 
-        start_response = await self._get_start_response(target)
-        intro = f"检测到《{window_title}》已经打开，我来陪你。"
-        await self._send_plain_message(target, f"{intro}\n{start_response}".strip())
+        if self._start_end_messages_enabled():
+            start_response = await self._get_start_response(target)
+            intro = f"检测到《{window_title}》已经打开，我来陪你。"
+            await self._send_plain_message(target, f"{intro}\n{start_response}".strip())
         logger.info(f"窗口陪伴已启动: {window_title}")
         return True
 
@@ -853,7 +854,7 @@ class ScreenCompanionProactiveMixin:
             self.is_running = False
             self.state = "inactive"
 
-        if target and active_title:
+        if target and active_title and self._start_end_messages_enabled():
             end_response = await self._get_end_response(target)
             if reason == "disabled":
                 outro = f"《{active_title}》的窗口陪伴已经关闭，我先退到旁边。"

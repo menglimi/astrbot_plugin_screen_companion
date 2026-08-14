@@ -42,6 +42,390 @@ _screen_companion_current_tool_event: ContextVar[AstrMessageEvent | None] = Cont
 )
 
 
+def get_screen_companion_api() -> Any | None:
+    plugin = _screen_companion_tool_plugin
+    return getattr(plugin, "extension_api", None) if plugin is not None else None
+
+
+class ScreenCompanionExtensionAPI:
+    """Coordinate explicit shared activities without touching screen-observation state."""
+
+    WORK_CONTEXT_MAX_AGE_SECONDS = 5 * 60
+
+    def __init__(self, plugin: "ScreenCompanion") -> None:
+        self._plugin = plugin
+
+    @staticmethod
+    def _clean(value: Any, limit: int) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+    @classmethod
+    def _parse_timestamp(cls, value: Any) -> float:
+        if isinstance(value, datetime.datetime):
+            return value.timestamp()
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            pass
+        text = cls._clean(value, 80)
+        if not text:
+            return 0.0
+        try:
+            return datetime.datetime.fromisoformat(
+                text.replace("Z", "+00:00")
+            ).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    @classmethod
+    def _mask_window_title(cls, window_title: Any, app_name: Any = "") -> str:
+        raw_window = cls._clean(window_title, 160)
+        cleaned_app = cls._clean(app_name, 60)
+        if not raw_window:
+            return ""
+        if cleaned_app and cleaned_app.casefold() != raw_window.casefold():
+            return f"已脱敏 · {cleaned_app}"
+        return "已脱敏窗口"
+
+    @classmethod
+    def _redact_summary(cls, value: Any, sensitive_values: list[Any]) -> str:
+        text = cls._clean(value, 280)
+        for raw_value in sorted(
+            {cls._clean(item, 160) for item in sensitive_values},
+            key=len,
+            reverse=True,
+        ):
+            if len(raw_value) < 3:
+                continue
+            text = re.sub(re.escape(raw_value), "已脱敏内容", text, flags=re.IGNORECASE)
+        return cls._clean(text, 280)
+
+    @staticmethod
+    def _activity_type_for_scene(scene: str) -> str:
+        if scene in {"编程", "设计", "办公", "邮件", "浏览-工作"}:
+            return "工作"
+        if scene in {"游戏", "视频", "音乐", "社交", "浏览-娱乐"}:
+            return "摸鱼"
+        return "其他"
+
+    def get_capabilities(self) -> dict[str, Any]:
+        """Describe optional cross-plugin features without requiring a version check."""
+        return {
+            "api_version": "1.1",
+            "work_collaboration_context": True,
+            "shared_work": True,
+            "shared_activity_kinds": [
+                "shared_call",
+                "shared_watch",
+                "shared_work",
+            ],
+        }
+
+    async def get_work_collaboration_context(
+        self,
+        user_id: str = "",
+    ) -> dict[str, Any]:
+        """Return a small cached work context without capturing or analyzing the screen."""
+        plugin = self._plugin
+        privacy_masked = bool(
+            getattr(plugin, "mask_activity_window_titles", False)
+        )
+        tracking_enabled = bool(
+            getattr(plugin, "enable_background_activity_tracking", False)
+            or getattr(plugin, "is_running", False)
+            or getattr(plugin, "auto_tasks", {})
+        )
+        empty_result = {
+            "available": True,
+            "context_available": False,
+            "privacy_masked": privacy_masked,
+            "captured_at": 0.0,
+            "current": {},
+            "observation": {},
+            "tracking_enabled": tracking_enabled,
+            "active_window": "",
+            "current_activity": {},
+            "latest_analysis": {},
+        }
+
+        try:
+            # The user id is accepted for forward compatibility. Screen state is local
+            # and intentionally does not expose or persist the caller identity.
+            self._clean(user_id, 80)
+            now = time.time()
+            active_window = ""
+            active_window_reader = getattr(plugin, "_get_active_window_info", None)
+            if callable(active_window_reader):
+                active_window_info = await asyncio.to_thread(active_window_reader)
+                if isinstance(active_window_info, (tuple, list)):
+                    active_window = self._clean(
+                        active_window_info[0] if active_window_info else "",
+                        160,
+                    )
+                else:
+                    active_window = self._clean(active_window_info, 160)
+
+            current_snapshot: dict[str, Any] = {}
+            snapshot_builder = getattr(plugin, "_build_current_activity_snapshot", None)
+            if callable(snapshot_builder):
+                raw_snapshot = snapshot_builder()
+                if isinstance(raw_snapshot, dict):
+                    current_snapshot = dict(raw_snapshot)
+
+            recent_traces: list[dict[str, Any]] = []
+            trace_reader = getattr(plugin, "_get_recent_screen_analysis_traces", None)
+            if callable(trace_reader):
+                raw_traces = trace_reader(limit=8)
+                if isinstance(raw_traces, list):
+                    recent_traces = raw_traces
+            else:
+                recent_traces = list(
+                    reversed(list(getattr(plugin, "screen_analysis_traces", []) or [])[-8:])
+                )
+
+            observation: dict[str, Any] = {}
+            trace_window = ""
+            for trace in recent_traces:
+                if not isinstance(trace, dict):
+                    continue
+                status = self._clean(trace.get("status"), 40).casefold()
+                if status == "running" or status == "timeout" or status.startswith("error"):
+                    continue
+                observed_at = self._parse_timestamp(trace.get("timestamp"))
+                age_seconds = max(0.0, now - observed_at) if observed_at > 0 else 0.0
+                if (
+                    observed_at <= 0
+                    or age_seconds > self.WORK_CONTEXT_MAX_AGE_SECONDS
+                ):
+                    continue
+                trace_window = self._clean(
+                    trace.get("active_window_title")
+                    or trace.get("latest_window_title"),
+                    160,
+                )
+                summary = (
+                    trace.get("fact_summary")
+                    or trace.get("activity_description")
+                    or trace.get("recognition_summary")
+                    or ""
+                )
+                if privacy_masked:
+                    summary = self._redact_summary(
+                        summary,
+                        [
+                            trace_window,
+                            trace.get("latest_window_title"),
+                            trace.get("display_title"),
+                        ],
+                    )
+                else:
+                    summary = self._clean(summary, 280)
+                scene = self._clean(trace.get("scene"), 40)
+                if not summary and not scene:
+                    continue
+                observation = {
+                    "summary": summary,
+                    "scene": scene,
+                    "observed_at": float(observed_at),
+                    "age_seconds": int(age_seconds),
+                }
+                break
+
+            raw_window = (
+                active_window
+                or self._clean(current_snapshot.get("window"), 160)
+                or trace_window
+            )
+            snapshot_window = self._clean(current_snapshot.get("window"), 160)
+            scene = self._clean(current_snapshot.get("scene"), 40)
+            activity_type = self._clean(current_snapshot.get("type"), 24)
+            if active_window and (
+                not snapshot_window
+                or active_window.casefold() != snapshot_window.casefold()
+            ):
+                scene_identifier = getattr(plugin, "_identify_scene", None)
+                if callable(scene_identifier):
+                    scene = self._clean(scene_identifier(active_window), 40)
+                activity_type = self._activity_type_for_scene(scene)
+            elif not scene:
+                scene = self._clean(observation.get("scene"), 40)
+            if not activity_type:
+                activity_type = self._activity_type_for_scene(scene)
+
+            current_meta = dict(current_snapshot)
+            activity_meta_builder = getattr(plugin, "_build_activity_record_meta", None)
+            if raw_window and callable(activity_meta_builder):
+                built_meta = activity_meta_builder(
+                    activity_type=activity_type,
+                    scene=scene,
+                    window=raw_window,
+                )
+                if isinstance(built_meta, dict):
+                    current_meta.update(built_meta)
+
+            app_name = self._clean(current_meta.get("app_name"), 60)
+            raw_resource_label = self._clean(
+                current_meta.get("resource_label") or app_name or raw_window,
+                120,
+            )
+            if privacy_masked:
+                window_label = self._mask_window_title(raw_window, app_name)
+                if app_name.casefold() == self._clean(raw_window, 160).casefold():
+                    app_name = "已脱敏应用" if app_name else ""
+                resource_label = app_name or window_label
+            else:
+                window_label = self._clean(raw_window, 160)
+                resource_label = raw_resource_label
+
+            try:
+                duration_seconds = max(
+                    0,
+                    int(float(current_snapshot.get("duration", 0) or 0)),
+                )
+            except (TypeError, ValueError, OverflowError):
+                duration_seconds = 0
+            current = {
+                "type": self._clean(current_meta.get("type") or activity_type, 24),
+                "scene": self._clean(current_meta.get("scene") or scene, 40),
+                "app_name": app_name,
+                "window": window_label,
+                "resource_label": self._clean(resource_label, 120),
+                "duration_seconds": duration_seconds,
+            }
+            has_current = bool(raw_window or current_snapshot)
+            if not has_current:
+                current = {}
+
+            context_available = bool(current or observation)
+            captured_at = 0.0
+            if active_window:
+                captured_at = now
+            elif current:
+                try:
+                    captured_at = float(current_snapshot.get("end_time", 0) or now)
+                except (TypeError, ValueError, OverflowError):
+                    captured_at = now
+            elif observation:
+                captured_at = float(observation.get("observed_at", 0) or 0)
+
+            return {
+                "available": True,
+                "context_available": context_available,
+                "privacy_masked": privacy_masked,
+                "captured_at": captured_at,
+                "current": current,
+                "observation": observation,
+                "tracking_enabled": tracking_enabled,
+                "active_window": window_label if current else "",
+                "current_activity": dict(current),
+                "latest_analysis": dict(observation),
+            }
+        except Exception as exc:
+            logger.debug("获取工作协同上下文失败，已安全降级: %s", exc)
+            return empty_result
+
+    def notify_shared_activity_started(
+        self,
+        activity_id: str,
+        *,
+        user_id: str = "",
+        kind: str = "shared_watch",
+        label: str = "",
+        source_plugin: str = "external",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        key = self._clean(activity_id, 120)
+        if not key:
+            return {}
+        now = time.time()
+        item = {
+            "activity_id": key,
+            "user_id": self._clean(user_id, 80),
+            "kind": self._clean(kind, 40) or "shared_watch",
+            "label": self._clean(label, 160),
+            "source_plugin": self._clean(source_plugin, 100) or "external",
+            "started_at": now,
+            "updated_at": now,
+            "metadata": dict(metadata) if isinstance(metadata, dict) else {},
+        }
+        self._plugin._external_shared_activities[key] = item
+        return dict(item)
+
+    def notify_shared_activity_updated(
+        self,
+        activity_id: str,
+        *,
+        user_id: str = "",
+        kind: str = "",
+        label: str = "",
+        source_plugin: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        key = self._clean(activity_id, 120)
+        existing = self._plugin._external_shared_activities.get(key)
+        if not isinstance(existing, dict):
+            return self.notify_shared_activity_started(
+                key,
+                user_id=user_id,
+                kind=kind or "shared_watch",
+                label=label,
+                source_plugin=source_plugin or "external",
+                metadata=metadata,
+            )
+        item = dict(existing)
+        item.update(
+            {
+                "user_id": self._clean(user_id, 80) or item.get("user_id", ""),
+                "kind": self._clean(kind, 40) or item.get("kind", "shared_watch"),
+                "label": self._clean(label, 160) or item.get("label", ""),
+                "source_plugin": self._clean(source_plugin, 100) or item.get("source_plugin", "external"),
+                "updated_at": time.time(),
+            }
+        )
+        if isinstance(metadata, dict):
+            item["metadata"] = dict(metadata)
+        self._plugin._external_shared_activities[key] = item
+        return dict(item)
+
+    def notify_shared_activity_ended(self, activity_id: str) -> bool:
+        key = self._clean(activity_id, 120)
+        item = self._plugin._external_shared_activities.pop(key, None)
+        if not isinstance(item, dict):
+            return False
+        kind = self._clean(item.get("kind"), 40)
+        if kind == "shared_watch":
+            default_label = "一起看视频"
+            activity_type = "摸鱼"
+            scene = "视频"
+        elif kind == "shared_work":
+            default_label = "一起工作"
+            activity_type = "工作"
+            scene = "办公"
+        else:
+            default_label = "一起通话"
+            activity_type = "其他"
+            scene = "社交"
+        label = self._clean(item.get("label"), 160) or default_label
+        meta = self._plugin._build_activity_record_meta(
+            activity_type=activity_type,
+            scene=scene,
+            window=label,
+        )
+        meta["capture_source"] = self._clean(item.get("source_plugin"), 100) or "external"
+        return bool(
+            self._plugin._append_activity_record(
+                activity=f"{activity_type}:{scene}:{label}",
+                start_time=float(item.get("started_at") or time.time()),
+                end_time=time.time(),
+                min_duration_seconds=5,
+                activity_meta=meta,
+            )
+        )
+
+    def list_shared_activities(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._plugin._external_shared_activities.values() if isinstance(item, dict)]
+
+
 def admin_required(func):
     if inspect.isasyncgenfunction(func):
         @functools.wraps(func)
@@ -439,6 +823,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         super().__init__(context)
         global _screen_companion_tool_plugin
         _screen_companion_tool_plugin = self
+        self.extension_api = ScreenCompanionExtensionAPI(self)
+        self._external_shared_activities: dict[str, dict[str, Any]] = {}
         
         self.plugin_config = PluginConfig(config, context)
 
@@ -612,7 +998,7 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                 name="sync_remote_receiver_start",
             )
             self.background_tasks.append(task)
-        if self._use_screen_recording_mode():
+        if self._use_screen_recording_mode() and not self._get_runtime_flag("remote_mode"):
             self._safe_create_task(
                 self._ensure_recording_ready(),
                 name="screen_recording_bootstrap",
@@ -1001,6 +1387,9 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.vision_api_key_backup = getattr(self.plugin_config, 'vision_api_key_backup', None)
         self.vision_api_model_backup = getattr(self.plugin_config, 'vision_api_model_backup', None)
         self.user_preferences = self.plugin_config.user_preferences
+        self.enable_start_end_messages = self._coerce_bool(
+            getattr(self.plugin_config, "enable_start_end_messages", True)
+        )
         self.use_llm_for_start_end = self._coerce_bool(self.plugin_config.use_llm_for_start_end)
         self.start_preset = self.plugin_config.start_preset
         self.end_preset = self.plugin_config.end_preset
@@ -1116,6 +1505,8 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             5,
             int(getattr(self.plugin_config, "remote_screenshot_max_age", 60) or 60),
         )
+        if self.remote_mode and self.screen_recognition_mode:
+            logger.info("远程识屏录屏模式已启用，将等待客户端上传视频")
         self.custom_tasks = self.plugin_config.custom_tasks
         self.rest_time_range = self.plugin_config.rest_time_range
         self.enable_learning = self._coerce_bool(self.plugin_config.enable_learning)
@@ -1442,9 +1833,14 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
                         name="switch_screen_recognition_mode",
                     )
 
+                persisted_updates = dict(config_dict)
+                if not self.plugin_config.verify_persisted(persisted_updates):
+                    raise RuntimeError("配置更新后未能在配置文件中验证到相同内容")
+
                 logger.debug("配置更新完成")
         except Exception as e:
             logger.error(f"更新配置失败: {e}")
+            raise
 
 
 
@@ -1898,8 +2294,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
 
             self.auto_tasks.clear()
             logger.info("所有自动观察任务已停止")
-            end_response = await self._get_end_response(event.unified_msg_origin)
-            yield event.plain_result(end_response)
+            if self._start_end_messages_enabled():
+                end_response = await self._get_end_response(event.unified_msg_origin)
+                yield event.plain_result(end_response)
+            else:
+                yield event.plain_result("所有自动观察任务已停止。")
         else:
             # 启动自动观察
             if not self.enabled:
@@ -1925,8 +2324,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
                 self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
             )
-            start_response = await self._get_start_response(event.unified_msg_origin)
-            yield event.plain_result(start_response)
+            if self._start_end_messages_enabled():
+                start_response = await self._get_start_response(event.unified_msg_origin)
+                yield event.plain_result(start_response)
+            else:
+                yield event.plain_result("自动观察已启动。")
 
     @filter.command_group("kpi")
     def kpi_group(self):
@@ -1990,8 +2392,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
         self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
             self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
         )
-        start_response = await self._get_start_response(event.unified_msg_origin)
-        yield event.plain_result(f"已启动自动观察任务 {self.AUTO_TASK_ID}。\n{start_response}")
+        message = f"已启动自动观察任务 {self.AUTO_TASK_ID}。"
+        if self._start_end_messages_enabled():
+            start_response = await self._get_start_response(event.unified_msg_origin)
+            message = f"{message}\n{start_response}".strip()
+        yield event.plain_result(message)
 
     @admin_required
     @kpi_group.command("stop")
@@ -2034,8 +2439,11 @@ class ScreenCompanion(ScreenCompanionProactiveMixin, ScreenCompanionRuntimeMixin
             
             self.is_running = False
             self.state = "inactive"
-            end_response = await self._get_end_response(event.unified_msg_origin)
-            yield event.plain_result(f"已停止所有自动观察任务。\n{end_response}")
+            message = "已停止所有自动观察任务。"
+            if self._start_end_messages_enabled():
+                end_response = await self._get_end_response(event.unified_msg_origin)
+                message = f"{message}\n{end_response}".strip()
+            yield event.plain_result(message)
 
 
 

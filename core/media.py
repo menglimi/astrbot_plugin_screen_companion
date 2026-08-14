@@ -2269,6 +2269,82 @@ class ScreenCompanionMediaMixin:
                         break
                     await asyncio.sleep(1)
 
+    async def _restart_auto_screen_task_later(
+        self,
+        event: AstrMessageEvent,
+        task_id: str,
+        custom_prompt: str,
+        interval: int | None,
+    ) -> None:
+        """短暂异常退出后恢复自动观察，避免单次异常让任务静默消失。"""
+        restart_tasks = getattr(self, "_auto_screen_restart_tasks", {})
+        try:
+            await asyncio.sleep(3)
+            if (
+                not getattr(self, "running", True)
+                or not getattr(self, "enabled", True)
+                or not getattr(self, "is_running", False)
+                or getattr(self, "state", "inactive") != "active"
+                or not self._is_current_process_instance()
+                or task_id in getattr(self, "auto_tasks", {})
+            ):
+                return
+            self.auto_tasks[task_id] = asyncio.create_task(
+                self._auto_screen_task(
+                    event,
+                    task_id=task_id,
+                    custom_prompt=custom_prompt,
+                    interval=interval,
+                )
+            )
+            logger.info(f"[任务 {task_id}] 已从异常退出恢复，自动观察继续运行")
+        finally:
+            restart_tasks.pop(task_id, None)
+
+    def _schedule_auto_screen_restart(
+        self,
+        event: AstrMessageEvent,
+        task_id: str,
+        custom_prompt: str,
+        interval: int | None,
+    ) -> bool:
+        """安排有限次数的自动观察恢复，避免异常时无限快速重启。"""
+        self._ensure_runtime_state()
+        if task_id in self._auto_screen_restart_tasks:
+            return True
+
+        now = time.monotonic()
+        history = [
+            timestamp
+            for timestamp in self._auto_screen_restart_history.get(task_id, [])
+            if now - timestamp < 300
+        ]
+        if len(history) >= 3:
+            self._auto_screen_restart_history[task_id] = history
+            logger.error(
+                f"[任务 {task_id}] 5 分钟内连续异常退出超过 3 次，已暂停自动恢复，请检查日志"
+            )
+            return False
+
+        history.append(now)
+        self._auto_screen_restart_history[task_id] = history
+        restart_task = asyncio.create_task(
+            self._restart_auto_screen_task_later(
+                event,
+                task_id,
+                custom_prompt,
+                interval,
+            )
+        )
+        self._auto_screen_restart_tasks[task_id] = restart_task
+        return True
+
+    def _start_end_messages_enabled(self) -> bool:
+        value = getattr(self, "enable_start_end_messages", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     async def _auto_screen_task(
         self,
         event: AstrMessageEvent,
@@ -2285,10 +2361,12 @@ class ScreenCompanionMediaMixin:
         """
         self._ensure_runtime_state()
         logger.info(f"[任务 {task_id}] 启动自动识屏任务")
-        
+        termination_reason = "loop_exit"
+
         try:
             while self.is_running and self.state == "active" and self._is_current_process_instance():
                 if not self._is_in_active_time_range():
+                    termination_reason = "outside_active_time"
                     logger.info(f"[任务 {task_id}] 当前不在活跃时间段，准备停止任务")
                     # 清理任务
                     if task_id in self.auto_tasks:
@@ -2389,6 +2467,7 @@ class ScreenCompanionMediaMixin:
 
                 # 再次确认是否仍处于活跃时间段
                 if not self._is_in_active_time_range():
+                    termination_reason = "outside_active_time"
                     logger.info(f"[任务 {task_id}] 已离开活跃时间段，停止任务")
                     # 清理任务
                     if task_id in self.auto_tasks:
@@ -2481,6 +2560,7 @@ class ScreenCompanionMediaMixin:
                             break
 
                         if not self._is_in_active_time_range():
+                            termination_reason = "outside_active_time"
                             logger.info(
                                 f"[Task {task_id}] outside active time range, stopping task"
                             )
@@ -2490,6 +2570,7 @@ class ScreenCompanionMediaMixin:
                             # 检查是否还有其他任务在运行
                             if not self.auto_tasks:
                                 self.is_running = False
+                                self.state = "inactive"
                             break
 
                         # 妫鏌ユ槸鍚﹁鍋滄
@@ -2691,22 +2772,69 @@ class ScreenCompanionMediaMixin:
                         import traceback
 
                         logger.error(traceback.format_exc())
+            if termination_reason == "loop_exit":
+                if not self._is_current_process_instance():
+                    termination_reason = "stale_process_instance"
+                elif not self.is_running or self.state != "active":
+                    termination_reason = "state_changed"
         except asyncio.CancelledError:
+            termination_reason = "cancelled"
             logger.info(f"任务 {task_id} 已被取消")
         except Exception as e:
+            termination_reason = "exception"
             logger.error(f"任务 {task_id} 异常: {e}")
         finally:
-            if task_id in self.auto_tasks:
+            current_task = asyncio.current_task()
+            if self.auto_tasks.get(task_id) is current_task:
                 del self.auto_tasks[task_id]
                 logger.info(f"[任务 {task_id}] 已从自动任务列表移除")
-            # 检查是否还有其他任务在运行
-            if not self.auto_tasks:
+            has_active_state = (
+                bool(getattr(self, "running", True))
+                and bool(getattr(self, "enabled", True))
+                and bool(getattr(self, "is_running", False))
+                and getattr(self, "state", "inactive") == "active"
+                and self._is_current_process_instance()
+            )
+            should_restart = (
+                termination_reason == "exception"
+                and has_active_state
+            )
+            restart_scheduled = False
+            if should_restart:
+                restart_scheduled = self._schedule_auto_screen_restart(
+                    event,
+                    task_id,
+                    custom_prompt,
+                    interval,
+                )
+                logger.warning(
+                    f"[任务 {task_id}] 异常退出（reason={termination_reason}），"
+                    f"{'将在 3 秒后重启' if restart_scheduled else '不会继续重启'}"
+                )
+
+            runtime_state_builder = getattr(self, "_ensure_auto_screen_runtime_state", None)
+            if callable(runtime_state_builder):
+                try:
+                    runtime_state = runtime_state_builder(task_id)
+                    runtime_state["last_termination_reason"] = termination_reason
+                    runtime_state["last_ended_at"] = time.time()
+                    if restart_scheduled:
+                        runtime_state["restart_count"] = int(
+                            runtime_state.get("restart_count", 0) or 0
+                        ) + 1
+                except Exception as e:
+                    logger.debug(f"记录自动观察结束原因失败: {e}")
+
+            # 没有其它任务且没有安排恢复时，统一收敛全局状态。
+            if not self.auto_tasks and not restart_scheduled:
                 reset_away_pause = getattr(self, "_reset_away_pause_runtime_state", None)
                 if callable(reset_away_pause):
                     reset_away_pause()
                 self.is_running = False
+                if self.state == "active":
+                    self.state = "inactive"
                 logger.info("所有自动观察任务已结束")
-            logger.info(f"任务 {task_id} 已结束")
+            logger.info(f"任务 {task_id} 已结束，原因: {termination_reason}")
 
     def _split_message(self, text: str, max_length: int = 1000) -> list[str]:
         """将较长文本拆分为适合发送的多段消息。"""
@@ -2773,6 +2901,11 @@ class ScreenCompanionMediaMixin:
                 self.window_companion_active_target = ""
                 self.window_companion_active_rule = {}
 
+                await self._cancel_tasks(
+                    list(getattr(self, "_auto_screen_restart_tasks", {}).values()),
+                    "自动观察恢复任务",
+                )
+                getattr(self, "_auto_screen_restart_tasks", {}).clear()
                 await self._cancel_tasks(list(self.auto_tasks.values()), "自动任务")
                 self.auto_tasks.clear()
 
@@ -2844,6 +2977,13 @@ class ScreenCompanionMediaMixin:
         Args:
             check_mic: Whether microphone-related dependencies are required.
         """
+        # Remote clients provide the desktop image, so the server must not
+        # probe pyautogui or DISPLAY before validating the receiver itself.
+        if self._get_runtime_flag("remote_mode"):
+            if self._use_screen_recording_mode():
+                return self._check_recording_env(check_mic=check_mic)
+            return self._check_screenshot_env(check_mic=check_mic)
+
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
@@ -3103,6 +3243,8 @@ class ScreenCompanionMediaMixin:
 
     async def _get_start_response(self, umo: str = None) -> str:
         """Build the startup reply text."""
+        if not self._start_end_messages_enabled():
+            return ""
         mode = "llm" if self.use_llm_for_start_end else "preset"
         if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
             return self.start_preset
@@ -3129,6 +3271,8 @@ class ScreenCompanionMediaMixin:
 
     async def _get_end_response(self, umo: str = None) -> str:
         """生成结束陪伴时的回复。"""
+        if not self._start_end_messages_enabled():
+            return ""
         mode = "llm" if self.use_llm_for_start_end else "preset"
         if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
             return self.end_preset
@@ -3492,6 +3636,39 @@ class ScreenCompanionMediaMixin:
         return result
 
     async def _capture_recording_context(self) -> dict[str, Any]:
+        if self._get_runtime_flag("remote_mode"):
+            receiver = getattr(self, "_remote_receiver", None)
+            if receiver is None or not receiver.is_running:
+                raise RuntimeError("远程模式接收服务未启动，无法读取远程录屏")
+            video_bytes, video_meta = await receiver.get_latest_video()
+            if not video_bytes:
+                raise RuntimeError("远程模式尚未收到录屏，请确认客户端已启用 --video")
+            max_age = max(
+                5,
+                int(getattr(self, "remote_screenshot_max_age", 60) or 60),
+            )
+            if receiver.latest_video_age_seconds > max_age:
+                raise RuntimeError("远程录屏已过期，请确认客户端仍在推送录屏")
+            latest_image_bytes, latest_window_title, _ = (
+                await receiver.get_latest_screenshot()
+            )
+            window_title = str(
+                video_meta.get("window_title", "")
+                or latest_window_title
+                or "远程客户端录屏"
+            )
+            return {
+                "media_kind": "video",
+                "mime_type": str(video_meta.get("mime_type", "video/mp4") or "video/mp4"),
+                "media_bytes": video_bytes,
+                "active_window_title": window_title,
+                "clip_active_window_title": window_title,
+                "latest_window_title": latest_window_title or window_title,
+                "latest_image_bytes": latest_image_bytes,
+                "duration_seconds": video_meta.get("duration_seconds", 0),
+                "source_label": window_title,
+            }
+
         self._ensure_recording_runtime_state()
         clip_active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
 
@@ -3648,6 +3825,8 @@ class ScreenCompanionMediaMixin:
         force_fresh_recording: bool = False,
     ) -> dict[str, Any]:
         if self._get_runtime_flag("remote_mode"):
+            if self._use_screen_recording_mode():
+                return await self._capture_recording_context()
             return await self._capture_screenshot_context(
                 force_fresh_capture=force_fresh_capture
             )
@@ -3664,6 +3843,8 @@ class ScreenCompanionMediaMixin:
 
     async def _capture_proactive_recognition_context(self) -> dict[str, Any]:
         if self._get_runtime_flag("remote_mode"):
+            if self._use_screen_recording_mode():
+                return await self._capture_recording_context()
             return await self._capture_screenshot_context()
         if self._use_screen_recording_mode():
             return await self._capture_one_shot_recording_context(
@@ -4010,24 +4191,23 @@ class ScreenCompanionMediaMixin:
         active_window_title: str,
     ) -> str:
         settings = self._get_astrbot_image_caption_settings()
-        provider_id = str(settings.get("provider_id", "") or "").strip()
-        if not provider_id:
+        # ``vision_provider_id`` is also useful when the normal interaction
+        # path is not using an external vision API: use it for the text-only
+        # recognition pass, then let the configured chat model compose the
+        # final reply. This keeps recognition and conversation independent.
+        configured_provider_id = str(getattr(self, "vision_provider_id", "") or "").strip()
+        fallback_provider_id = str(settings.get("provider_id", "") or "").strip()
+        provider_ids = list(dict.fromkeys(
+            provider_id
+            for provider_id in (configured_provider_id, fallback_provider_id)
+            if provider_id
+        ))
+        if not provider_ids:
             return ""
 
         getter = getattr(self.context, "get_provider_by_id", None)
         if not callable(getter):
             logger.debug("当前 AstrBot context 不支持 get_provider_by_id，跳过图片转述 provider")
-            return ""
-
-        provider = None
-        try:
-            provider = getter(provider_id)
-        except Exception as e:
-            logger.debug(f"获取图片转述 provider 失败 {provider_id}: {e}")
-            return ""
-
-        if not provider:
-            logger.warning(f"找不到 AstrBot 图片转述 provider: {provider_id}")
             return ""
 
         data_url = self._build_data_url(media_bytes, mime_type)
@@ -4042,24 +4222,34 @@ class ScreenCompanionMediaMixin:
         if not prompt:
             prompt = "请用中文简洁描述这张图片内容。"
 
-        try:
-            response = await asyncio.wait_for(
-                provider.text_chat(
-                    prompt=prompt,
-                    image_urls=[data_url],
-                ),
-                timeout=60.0,
-            )
-        except Exception as e:
-            logger.warning(f"AstrBot 图片转述 provider 调用失败 {provider_id}: {e}")
-            return ""
+        for provider_id in provider_ids:
+            try:
+                provider = getter(provider_id)
+            except Exception as e:
+                logger.debug(f"获取图片转述 provider 失败 {provider_id}: {e}")
+                continue
+            if not provider:
+                logger.warning(f"找不到 AstrBot 图片转述 provider: {provider_id}")
+                continue
+            try:
+                response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=prompt,
+                        image_urls=[data_url],
+                    ),
+                    timeout=60.0,
+                )
+            except Exception as e:
+                logger.warning(f"AstrBot 图片转述 provider 调用失败 {provider_id}: {e}")
+                continue
 
-        completion_text = str(
-            getattr(response, "completion_text", "") or getattr(response, "text", "") or ""
-        ).strip()
-        if completion_text:
-            logger.info(f"已使用 AstrBot 图片转述 provider 识屏: {provider_id}")
-        return completion_text
+            completion_text = str(
+                getattr(response, "completion_text", "") or getattr(response, "text", "") or ""
+            ).strip()
+            if completion_text:
+                logger.info(f"已使用 AstrBot 图片转述 provider 识屏: {provider_id}")
+                return completion_text
+        return ""
 
     def _resolve_provider_runtime_info(
         self,
@@ -4621,10 +4811,7 @@ class ScreenCompanionMediaMixin:
 
     def _check_recording_env(self, check_mic: bool = False) -> tuple[bool, str]:
         if self._get_runtime_flag("remote_mode"):
-            return (
-                False,
-                "远程模式当前只支持截图推送，不支持远程录屏。请使用 /kp，或关闭远程模式后再用 /kpr。",
-            )
+            return self._check_screenshot_env(check_mic=check_mic)
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg

@@ -16,7 +16,7 @@ from astrbot.api import logger
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
 
-    APP_VERSION = "3.2.2"
+    APP_VERSION = "3.3.0"
     CLIENT_MAX_SIZE = 50 * 1024 * 1024
     SESSION_CLEANUP_INTERVAL = 300
     SESSION_MAX_COUNT = 1000
@@ -2871,6 +2871,7 @@ class WebServer:
                     "companion_prompt",
                     "user_preferences",
                     "enable_natural_language_screen_assist",
+                    "enable_start_end_messages",
                     "use_llm_for_start_end",
                     "start_preset",
                     "end_preset",
@@ -3238,10 +3239,22 @@ class WebServer:
             patch_setting_meta(field_key, advanced=True)
 
         conditional_fields = {
-            "start_preset": {"use_llm_for_start_end": False},
-            "end_preset": {"use_llm_for_start_end": False},
-            "start_llm_prompt": {"use_llm_for_start_end": True},
-            "end_llm_prompt": {"use_llm_for_start_end": True},
+            "start_preset": {
+                "enable_start_end_messages": True,
+                "use_llm_for_start_end": False,
+            },
+            "end_preset": {
+                "enable_start_end_messages": True,
+                "use_llm_for_start_end": False,
+            },
+            "start_llm_prompt": {
+                "enable_start_end_messages": True,
+                "use_llm_for_start_end": True,
+            },
+            "end_llm_prompt": {
+                "enable_start_end_messages": True,
+                "use_llm_for_start_end": True,
+            },
             "window_companion_targets": {"enable_window_companion": True},
             "window_companion_check_interval": {"enable_window_companion": True},
             "window_companion_reattach_grace_seconds": {"enable_window_companion": True},
