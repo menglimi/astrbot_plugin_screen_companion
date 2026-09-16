@@ -52,6 +52,26 @@ log = logging.getLogger("screen_client")
 
 PROTOCOL_VERSION = 2
 CAPABILITY_REQUEST_SCREENSHOT = "request_screenshot"
+#: 客户端能力：支持把截图裁剪到活动窗口。
+CAPABILITY_CAPTURE_ACTIVE_WINDOW = "capture_active_window"
+
+#: 截图范围标签：来自活动窗口裁剪，或来自整屏。
+CAPTURE_SCOPE_WINDOW = "window"
+CAPTURE_SCOPE_FULLSCREEN = "fullscreen"
+
+#: 窗口矩形短边小于该值时视为不可用于裁剪（与插件端本地实现保持一致）。
+WINDOW_MIN_SIZE = 20
+#: Windows 把最小化窗口放在约 -32000：低于该阈值的坐标视为无效。
+MINIMIZED_COORDINATE = -10000
+
+#: 窗口矩形：(left, top, width, height)。
+Rect = tuple[int, int, int, int]
+
+#: DPI 感知只需成功设置一次。
+_dpi_awareness_ready = False
+
+#: Win32 调用声明缓存：(ctypes, RECT 结构, user32, dwmapi)。
+_win32_api_cache = None
 
 #: 收到按需请求后，本次采集与上传允许使用的总预算（秒）。
 REQUEST_BUDGET_SECONDS = 10.0
@@ -178,49 +198,301 @@ def _ensure_not_expired(deadline: float) -> None:
         raise _CaptureBudgetExceededError("本地采集预算已耗尽")
 
 
+def _ensure_dpi_awareness() -> None:
+    """Windows 上启用 per-monitor DPI 感知。
+
+    客户端进程若不是 DPI 感知的，``GetWindowRect`` 返回的是被系统缩放过的逻辑
+    坐标，而桌面位图仍是物理像素；两者叠加会让裁剪区域整体偏移或截断。必须在
+    任何窗口/桌面 API 调用之前设置，且只需成功一次。
+    """
+    global _dpi_awareness_ready
+    if _dpi_awareness_ready or sys.platform != "win32":
+        return
+    _dpi_awareness_ready = True
+    try:
+        import ctypes
+
+        try:
+            # PROCESS_PER_MONITOR_DPI_AWARE = 2：多显示器混合缩放下坐标系仍然一致。
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception as e:
+        log.debug(f"启用 DPI 感知失败，窗口裁剪可能偏移: {e}")
+
+
+def _is_usable_rect(rect: Rect | None) -> bool:
+    """判断窗口矩形是否可用于裁剪。
+
+    多显示器的负坐标是合法的，因此不能简单要求坐标非负；只有 Windows 把
+    最小化窗口挪到 -32000 附近那类极端值才需要排除。
+    """
+    if rect is None:
+        return False
+    left, top, width, height = rect
+    if width < WINDOW_MIN_SIZE or height < WINDOW_MIN_SIZE:
+        return False
+    if left <= MINIMIZED_COORDINATE or top <= MINIMIZED_COORDINATE:
+        return False
+    return True
+
+
+def _rect_from_bounds(left: int, top: int, right: int, bottom: int) -> Rect | None:
+    rect = (int(left), int(top), int(right) - int(left), int(bottom) - int(top))
+    return rect if _is_usable_rect(rect) else None
+
+
+def _win32_api():
+    """按 64 位指针宽度配置 Win32 调用。
+
+    ctypes 默认把返回值当作 ``c_int``；``GetForegroundWindow`` 返回的是指针宽度
+    的 HWND，不声明 ``restype`` 时高位会被截断，拿到错误的窗口句柄。
+    """
+    global _win32_api_cache
+    if _win32_api_cache is not None:
+        return _win32_api_cache
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _WinRect(ctypes.Structure):
+        _fields_ = [
+            ("left", wintypes.LONG),
+            ("top", wintypes.LONG),
+            ("right", wintypes.LONG),
+            ("bottom", wintypes.LONG),
+        ]
+
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_wchar),
+        ctypes.c_int,
+    ]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.IsIconic.argtypes = [ctypes.c_void_p]
+    user32.IsIconic.restype = ctypes.c_bool
+    user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_WinRect)]
+    user32.GetWindowRect.restype = ctypes.c_bool
+
+    dwmapi = ctypes.windll.dwmapi
+    dwmapi.DwmGetWindowAttribute.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.POINTER(_WinRect),
+        ctypes.c_uint,
+    ]
+    dwmapi.DwmGetWindowAttribute.restype = ctypes.c_int
+
+    _win32_api_cache = (ctypes, _WinRect, user32, dwmapi)
+    return _win32_api_cache
+
+
+def _win32_extended_frame_bounds(hwnd: int) -> Rect | None:
+    """Windows 10+ 窗口的可见边界（不含不可见的调整边框）。"""
+    try:
+        ctypes, win_rect, _user32, dwmapi = _win32_api()
+
+        rect = win_rect()
+        # DWMWA_EXTENDED_FRAME_BOUNDS = 9
+        result = dwmapi.DwmGetWindowAttribute(
+            hwnd, ctypes.c_uint(9), ctypes.byref(rect), ctypes.sizeof(rect)
+        )
+        if result != 0:
+            return None
+        return _rect_from_bounds(rect.left, rect.top, rect.right, rect.bottom)
+    except Exception as e:
+        log.debug(f"DWM 可见边界读取失败，回退 GetWindowRect: {e}")
+        return None
+
+
+def _win32_window_rect(hwnd: int) -> Rect | None:
+    try:
+        ctypes, win_rect, user32, _dwmapi = _win32_api()
+
+        rect = win_rect()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        return _rect_from_bounds(rect.left, rect.top, rect.right, rect.bottom)
+    except Exception as e:
+        log.debug(f"GetWindowRect 读取失败: {e}")
+        return None
+
+
+def _query_active_window_win32() -> tuple[str, Rect | None, bool]:
+    """Windows：一次调用同时取回前台窗口标题与可见边界。"""
+    _ensure_dpi_awareness()
+    try:
+        ctypes, _win_rect, user32, _dwmapi = _win32_api()
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "", None, False
+
+        length = max(0, int(user32.GetWindowTextLengthW(hwnd)))
+        buffer = ctypes.create_unicode_buffer(max(1, length + 1))
+        user32.GetWindowTextW(hwnd, buffer, max(1, length + 1))
+        title = str(buffer.value or "").strip()
+
+        if user32.IsIconic(hwnd):
+            # 最小化窗口没有有效可视区域：标题可用，但矩形不可用。
+            return title, None, True
+
+        rect = _win32_extended_frame_bounds(hwnd) or _win32_window_rect(hwnd)
+        return title, rect, True
+    except Exception as e:
+        log.debug(f"Win32 前台窗口查询失败，改用 pygetwindow: {e}")
+        return _query_active_window_pygetwindow()
+
+
+def _query_active_window_pygetwindow() -> tuple[str, Rect | None, bool]:
+    try:
+        import pygetwindow
+
+        win = pygetwindow.getActiveWindow()
+        if not win:
+            return "", None, False
+        title = str(win.title or "").strip()
+        rect = (
+            int(getattr(win, "left", 0) or 0),
+            int(getattr(win, "top", 0) or 0),
+            int(getattr(win, "width", 0) or 0),
+            int(getattr(win, "height", 0) or 0),
+        )
+        return title, (rect if _is_usable_rect(rect) else None), True
+    except Exception as e:
+        log.debug(f"pygetwindow 查询活动窗口失败: {e}")
+        return "", None, False
+
+
+def _parse_int_pair(text: str) -> tuple[int, int] | None:
+    parts = [part.strip() for part in str(text or "").split(",")]
+    if len(parts) != 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _query_active_window_darwin(timeout: float) -> tuple[str, Rect | None, bool]:
+    """macOS：AppleScript 同时取回前台应用名与窗口位置/尺寸。"""
+    script = (
+        'tell application "System Events"\n'
+        '  set frontApp to first application process whose frontmost is true\n'
+        '  set appName to name of frontApp\n'
+        '  try\n'
+        '    set win to first window of frontApp\n'
+        '    set winPos to position of win\n'
+        '    set winSize to size of win\n'
+        '    return appName & linefeed & (item 1 of winPos) & "," & (item 2 of winPos)'
+        ' & linefeed & (item 1 of winSize) & "," & (item 2 of winSize)\n'
+        '  on error\n'
+        '    return appName\n'
+        '  end try\n'
+        'end tell'
+    )
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    lines = [line.strip() for line in str(result.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return "", None, True
+    title = lines[0]
+    if len(lines) < 3:
+        # 只有应用名（例如应用没有可访问窗口）：标题可用但矩形不可用。
+        return title, None, True
+    position = _parse_int_pair(lines[1])
+    size = _parse_int_pair(lines[2])
+    if position is None or size is None:
+        return title, None, True
+    rect = (position[0], position[1], size[0], size[1])
+    return title, (rect if _is_usable_rect(rect) else None), True
+
+
+def _query_active_window_x11(timeout: float) -> tuple[str, Rect | None, bool]:
+    """Linux：用 xdotool 取活动窗口标题与几何。"""
+    # 两次子进程共享同一个标题预算，避免拖长按需请求。
+    per_call = max(0.05, float(timeout) / 2.0)
+    title_result = subprocess.run(
+        ["xdotool", "getactivewindow", "getwindowname"],
+        capture_output=True,
+        text=True,
+        timeout=per_call,
+    )
+    title = str(title_result.stdout or "").strip()
+
+    geometry_result = subprocess.run(
+        ["xdotool", "getactivewindow", "getwindowgeometry", "--shell"],
+        capture_output=True,
+        text=True,
+        timeout=per_call,
+    )
+    values: dict[str, int] = {}
+    for line in str(geometry_result.stdout or "").splitlines():
+        key, _, raw = line.partition("=")
+        key = key.strip().upper()
+        if key not in {"X", "Y", "WIDTH", "HEIGHT"}:
+            continue
+        try:
+            values[key] = int(raw.strip())
+        except (TypeError, ValueError):
+            continue
+    if not {"X", "Y", "WIDTH", "HEIGHT"} <= set(values):
+        return title, None, True
+    rect = (values["X"], values["Y"], values["WIDTH"], values["HEIGHT"])
+    return title, (rect if _is_usable_rect(rect) else None), True
+
+
+def window_geometry_supported() -> bool:
+    """当前平台是否实现了活动窗口几何查询。"""
+    return sys.platform in {"win32", "darwin", "linux"}
+
+
+def _query_active_window(timeout: float) -> tuple[str, Rect | None, bool]:
+    """一次查询同时取回活动窗口标题与矩形。
+
+    标题与矩形必须来自同一次查询：分两次查询会在切换窗口时把两幅画面配到一起。
+    返回 ``(标题, 矩形或 None, 是否成功)``；成功但矩形不可用时矩形为 ``None``，
+    调用方应回退全屏并如实标注实际范围。
+    """
+    budget = max(0.0, float(timeout))
+    if budget <= 0:
+        return "", None, False
+    try:
+        if sys.platform == "win32":
+            return _query_active_window_win32()
+        if sys.platform == "darwin":
+            return _query_active_window_darwin(budget)
+        if sys.platform == "linux":
+            return _query_active_window_x11(budget)
+        # 其他平台没有实现几何查询：文档里已说明只支持三平台。
+        return "", None, False
+    except Exception as e:
+        log.debug(f"活动窗口查询失败: {e}")
+        return "", None, False
+
+
 def _query_active_window_title(timeout: float) -> tuple[str, bool]:
     """带超时查询活动窗口标题。
 
     返回 ``(标题, 是否成功)``：查询失败与"成功得到空标题"必须区分，
     否则调用方会把失败误判成标题没变而跳过补拍。
     """
-    budget = max(0.0, float(timeout))
-    if budget <= 0:
-        return "", False
-    try:
-        if sys.platform == "win32":
-            import pygetwindow
-
-            win = pygetwindow.getActiveWindow()
-            return (str(win.title or "").strip() if win else ""), True
-        if sys.platform == "darwin":
-            script = (
-                "tell application \"System Events\" to get name of first application "
-                "process whose frontmost is true"
-            )
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=budget,
-            )
-            return result.stdout.strip(), True
-
-        result = subprocess.run(
-            ["xdotool", "getactivewindow", "getwindowname"],
-            capture_output=True,
-            text=True,
-            timeout=budget,
-        )
-        return result.stdout.strip(), True
-    except Exception as e:
-        log.debug(f"Failed to get window title: {e}")
-        return "", False
+    title, _rect, ok = _query_active_window(timeout)
+    return title, ok
 
 
 def get_active_window_title() -> str:
     """获取活动窗口标题；查询失败时返回空字符串。"""
-    title, _ok = _query_active_window_title(TITLE_PER_CALL_SECONDS)
+    title, _rect, _ok = _query_active_window(TITLE_PER_CALL_SECONDS)
     return title
 
 
@@ -235,6 +507,19 @@ def _get_title_with_budget(
     title, ok = _query_active_window_title(remaining)
     budget.consume(time.monotonic() - started)
     return title, ok
+
+
+def _get_window_with_budget(
+    budget: _TitleBudget, deadline: float
+) -> tuple[str, Rect | None, bool]:
+    """在标题预算与请求预算内查询一次窗口标题与矩形。"""
+    remaining = min(budget.per_call_seconds, budget.remaining, _remaining_seconds(deadline))
+    if remaining <= 0:
+        return "", None, False
+    started = time.monotonic()
+    title, rect, ok = _query_active_window(remaining)
+    budget.consume(time.monotonic() - started)
+    return title, rect, ok
 
 
 def get_system_stats() -> dict[str, Any]:
@@ -263,7 +548,8 @@ def get_system_stats() -> dict[str, Any]:
     return stats
 
 
-def capture_screenshot(image_quality: int = 70) -> bytes:
+def _load_pyautogui():
+    """按需加载 pyautogui；默认连接不应因为导入截图库而访问桌面。"""
     global pyautogui
     if pyautogui is None:
         try:
@@ -271,7 +557,10 @@ def capture_screenshot(image_quality: int = 70) -> bytes:
         except ImportError as exc:
             raise RuntimeError("截图模式需要 pyautogui 和 Pillow，请先安装客户端依赖") from exc
         pyautogui = pyautogui_module
-    screenshot = pyautogui.screenshot()
+    return pyautogui
+
+
+def _encode_screenshot(screenshot, image_quality: int) -> bytes:
     if screenshot.mode != "RGB":
         screenshot = screenshot.convert("RGB")
     buf = io.BytesIO()
@@ -279,44 +568,101 @@ def capture_screenshot(image_quality: int = 70) -> bytes:
     return buf.getvalue()
 
 
+def capture_screenshot(image_quality: int = 70) -> bytes:
+    return _encode_screenshot(_load_pyautogui().screenshot(), image_quality)
+
+
+def capture_screenshot_region(region: Rect, image_quality: int = 70) -> bytes:
+    """只截取给定的屏幕矩形（多显示器下坐标可以为负）。"""
+    return _encode_screenshot(
+        _load_pyautogui().screenshot(region=tuple(region)), image_quality
+    )
+
+
+def _capture_with_optional_region(
+    image_quality: int, region: Rect | None
+) -> tuple[bytes, bool]:
+    """按窗口矩形裁剪截图；矩形不可用或裁剪失败时回退全屏。
+
+    返回 ``(图片, 是否真的裁剪到窗口)``：调用方据此如实上报截图范围，
+    不能把回退后的全屏图当作窗口裁剪成功。
+    """
+    if region is None:
+        return capture_screenshot(image_quality), False
+    try:
+        return capture_screenshot_region(region, image_quality), True
+    except Exception as e:
+        log.warning(f"按活动窗口裁剪截图失败，回退为全屏: {e}")
+        return capture_screenshot(image_quality), False
+
+
 def capture_screenshot_context(
     image_quality: int = 70,
     deadline: float | None = None,
     *,
     include_stats: bool = False,
+    active_window_only: bool = False,
 ) -> tuple[bytes, str, dict[str, Any]]:
-    """一次同步调用内完成窗口标题配对与截图。
+    """一次同步调用内完成窗口配对与截图。
 
-    这是同步函数，必须在同一个线程中执行：标题查询与截图之间的间隔越短，
+    这是同步函数，必须在同一个线程中执行：窗口查询与截图之间的间隔越短，
     "图片与窗口信息错配"的概率就越低。可选系统统计不参与按需路径，
     避免 CPU/电池采样拖慢结果。
+
+    ``active_window_only`` 为真时只截活动窗口，并要求前后两次查询得到的标题
+    与矩形都一致；矩形拿不到（窗口最小化、平台不支持、坐标非法）时回退全屏，
+    并通过 ``capture_scope`` 如实标注实际范围。
     """
     if deadline is None:
         deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
     title_budget = _TitleBudget()
     title = ""
+    capture_scope = CAPTURE_SCOPE_FULLSCREEN
     captured_at = time.time()
     jpeg = b""
 
-    for _attempt in range(2):
+    for attempt in range(2):
         _ensure_not_expired(deadline)
-        before, before_ok = _get_title_with_budget(title_budget, deadline)
+        if active_window_only:
+            before_title, before_rect, before_ok = _get_window_with_budget(
+                title_budget, deadline
+            )
+        else:
+            before_title, before_ok = _get_title_with_budget(title_budget, deadline)
+            before_rect = None
+
         captured_at = time.time()
-        jpeg = capture_screenshot(image_quality)
-        after, after_ok = _get_title_with_budget(title_budget, deadline)
+        jpeg, cropped = _capture_with_optional_region(
+            image_quality, before_rect if active_window_only else None
+        )
+        capture_scope = CAPTURE_SCOPE_WINDOW if cropped else CAPTURE_SCOPE_FULLSCREEN
+
+        if active_window_only:
+            after_title, after_rect, after_ok = _get_window_with_budget(
+                title_budget, deadline
+            )
+        else:
+            after_title, after_ok = _get_title_with_budget(title_budget, deadline)
+            after_rect = None
+
         if not before_ok or not after_ok:
             # 可选元数据失败时不补拍、不延长请求。
             title = ""
             break
-        if before == after:
-            title = after
+        if before_title == after_title and before_rect == after_rect:
+            title = after_title
             break
-    else:  # pragma: no cover - 循环内必定 break
-        title = ""
+        if attempt == 1:
+            # 两次查询都不稳定：保留最后一张图，但不附带确定的窗口标题。
+            title = ""
 
     _ensure_not_expired(deadline)
     stats = get_system_stats() if include_stats else {}
-    meta: dict[str, Any] = {"timestamp": captured_at, "system_stats": stats}
+    meta: dict[str, Any] = {
+        "timestamp": captured_at,
+        "system_stats": stats,
+        "capture_scope": capture_scope,
+    }
     return jpeg, title, meta
 
 
@@ -376,6 +722,8 @@ class ClientConfig:
     request_budget: float = REQUEST_BUDGET_SECONDS
     ack_timeout: float = ACK_TIMEOUT_SECONDS
     video_ack_timeout: float = VIDEO_ACK_TIMEOUT_SECONDS
+    #: 客户端显式开关：True/False 覆盖服务端配置，None 表示跟随服务端。
+    active_window_override: bool | None = None
     reconnect_delay: float = 5.0
     refused_delay: float = 10.0
 
@@ -393,6 +741,12 @@ class ClientConfig:
             )
         )
         lines.append("周期录屏：" + ("启用" if self.video_enabled else "关闭"))
+        if self.active_window_override is True:
+            lines.append("截图范围：强制只截活动窗口（--active-window-only）")
+        elif self.active_window_override is False:
+            lines.append("截图范围：强制整屏（--no-active-window）")
+        else:
+            lines.append("截图范围：跟随插件端「只截取活动窗口」配置")
         if self.video_enabled and self.push_enabled and self.video_only:
             lines.append("提示：--push 对 --video-only 无效，纯视频模式不上传截图")
         if self.screenshot_only and self.video_enabled is False:
@@ -425,6 +779,13 @@ def validate_config(args: argparse.Namespace) -> ClientConfig:
 
     use_binary = bool(args.binary) or not bool(getattr(args, "json_output", False))
 
+    # 客户端显式开关优先于服务端配置；两者都未指定时跟随服务端。
+    active_window_override: bool | None = None
+    if bool(getattr(args, "active_window_only", False)):
+        active_window_override = True
+    elif bool(getattr(args, "no_active_window", False)):
+        active_window_override = False
+
     return ClientConfig(
         server_url=str(args.server or "").strip(),
         token=str(args.token or ""),
@@ -440,6 +801,7 @@ def validate_config(args: argparse.Namespace) -> ClientConfig:
         screenshot_only=screenshot_only,
         video_duration=video_duration,
         ffmpeg_path=str(args.ffmpeg_path or ""),
+        active_window_override=active_window_override,
     )
 
 
@@ -489,6 +851,8 @@ class RemoteClientSession:
         self._capture_task: asyncio.Task | None = None
         self._push_task: asyncio.Task | None = None
         self._video_task: asyncio.Task | None = None
+        #: 服务端在握手下发的会话级默认；显式周期推送没有逐次请求可用，靠它生效。
+        self._server_active_window = False
         self.disconnect_reason = ""
 
     # ------------------------------------------------------------------
@@ -562,10 +926,12 @@ class RemoteClientSession:
             self._negotiated = True
             return
 
-        capabilities = (
-            [CAPABILITY_REQUEST_SCREENSHOT] if self._config.screenshot_enabled else []
-        )
-        await self._exchange(
+        capabilities: list[str] = []
+        if self._config.screenshot_enabled:
+            capabilities.append(CAPABILITY_REQUEST_SCREENSHOT)
+            if window_geometry_supported():
+                capabilities.append(CAPABILITY_CAPTURE_ACTIVE_WINDOW)
+        reply = await self._exchange(
             {
                 "type": "client_capabilities",
                 "protocol_version": PROTOCOL_VERSION,
@@ -576,9 +942,14 @@ class RemoteClientSession:
             kind="handshake",
             timeout=HANDSHAKE_TIMEOUT_SECONDS,
         )
+        # 服务端握手下发的会话级默认：显式周期推送靠它生效。
+        options = reply.get("options") if isinstance(reply, dict) else None
+        if isinstance(options, dict) and "capture_active_window" in options:
+            self._server_active_window = bool(options.get("capture_active_window"))
         log.info(
-            "能力协商完成：capabilities=%s",
+            "能力协商完成：capabilities=%s，服务端默认截图范围=%s",
             capabilities or "[]（纯视频模式，不接收截图请求）",
+            "活动窗口" if self._server_active_window else "整屏",
         )
 
     # ------------------------------------------------------------------
@@ -878,17 +1249,34 @@ class RemoteClientSession:
             return
 
         deadline = time.monotonic() + float(self._config.request_budget)
+        # 逐次请求携带的范围要求；缺省或非布尔时跟随握手下发的会话默认。
+        requested_active_window = data.get("capture_active_window")
+        active_window_only = self._resolve_active_window(
+            requested_active_window if isinstance(requested_active_window, bool) else None
+        )
         # 同步预留作业状态：这一步到设置占用之间不能有 await。
         self._job_busy = True
         self._active_request_id = request_id
         self._capture_task = asyncio.get_running_loop().create_task(
-            self._capture_and_send(request_id, deadline)
+            self._capture_and_send(request_id, deadline, active_window_only)
         )
 
-    async def _capture_and_send(self, request_id: str, deadline: float) -> None:
+    def _resolve_active_window(self, request_value: bool | None) -> bool:
+        """决定本次截图范围：客户端显式开关 > 本次请求字段 > 服务端会话默认。"""
+        if self._config.active_window_override is not None:
+            return bool(self._config.active_window_override)
+        if request_value is not None:
+            return bool(request_value)
+        return bool(self._server_active_window)
+
+    async def _capture_and_send(
+        self, request_id: str, deadline: float, active_window_only: bool = False
+    ) -> None:
         """接受请求后立即重拍，再完成整帧发送事务。"""
         try:
-            jpeg_bytes, title, meta = await self._capture_now(deadline)
+            jpeg_bytes, title, meta = await self._capture_now(
+                deadline, active_window_only=active_window_only
+            )
             if _remaining_seconds(deadline) <= 0:
                 raise _CaptureBudgetExceededError("采集完成时预算已耗尽")
             await self._send_screenshot_payload(
@@ -936,7 +1324,11 @@ class RemoteClientSession:
             self._capture_task = None
 
     async def _capture_now(
-        self, deadline: float, *, include_stats: bool = False
+        self,
+        deadline: float,
+        *,
+        include_stats: bool = False,
+        active_window_only: bool = False,
     ) -> tuple[bytes, str, dict[str, Any]]:
         """在线程中执行一次同步采集，受进程内单线程槽位约束。"""
         _ensure_not_expired(deadline)
@@ -949,6 +1341,7 @@ class RemoteClientSession:
                 self._config.image_quality,
                 deadline,
                 include_stats=include_stats,
+                active_window_only=active_window_only,
             )
         except asyncio.CancelledError:
             # 线程仍在运行，由工作线程自行释放槽位；其结果不会被本会话发送。
@@ -968,12 +1361,16 @@ class RemoteClientSession:
         deadline: float | None = None,
     ) -> None:
         """完成一次完整的图像上传事务。"""
+        capture_scope = str(meta.get("capture_scope", "") or "")
         payload_base: dict[str, Any] = {
             "window_title": window_title,
             "system_stats": meta.get("system_stats", {}),
             "timestamp": meta.get("timestamp", time.time()),
             "client_id": self._config.client_id,
         }
+        if capture_scope:
+            # 如实上报本次是窗口裁剪还是全屏，避免回退被当成裁剪成功。
+            payload_base["capture_scope"] = capture_scope
         if request_id:
             payload_base["request_id"] = request_id
 
@@ -1019,7 +1416,13 @@ class RemoteClientSession:
 
     async def _push_loop(self) -> None:
         """显式 ``--push`` 的周期截图上传；与按需截图共享单个作业占用。"""
-        log.info("周期截图已启用（--push），间隔 %.1f 秒", self._config.interval)
+        # 周期推送没有逐次请求字段，使用客户端开关或握手下发的服务端默认。
+        active_window_only = self._resolve_active_window(None)
+        log.info(
+            "周期截图已启用（--push），间隔 %.1f 秒，截图范围=%s",
+            self._config.interval,
+            "活动窗口" if active_window_only else "整屏",
+        )
         while not self._closed:
             try:
                 await asyncio.sleep(self._config.interval)
@@ -1034,7 +1437,9 @@ class RemoteClientSession:
                         float(self._config.request_budget), 30.0
                     )
                     jpeg_bytes, title, meta = await self._capture_now(
-                        deadline, include_stats=True
+                        deadline,
+                        include_stats=True,
+                        active_window_only=active_window_only,
                     )
                     await self._send_screenshot_payload(jpeg_bytes, title, meta)
                 finally:
@@ -1061,12 +1466,18 @@ class RemoteClientSession:
                     continue
                 self._job_busy = True
                 try:
+                    # 与本地录屏语义对齐：录制前先取一次活动窗口标题。
+                    # 录完再取会把「录制期间切到的窗口」配给这段视频，
+                    # 而视频内容其实是切换前那段画面。
+                    title_before = await asyncio.to_thread(
+                        get_active_window_title
+                    )
                     video_bytes = await asyncio.to_thread(
                         capture_video,
                         self._config.video_duration,
                         self._config.ffmpeg_path,
                     )
-                    await self._send_video(video_bytes)
+                    await self._send_video(video_bytes, title_before=title_before)
                 finally:
                     self._job_busy = False
             except asyncio.CancelledError:
@@ -1078,17 +1489,32 @@ class RemoteClientSession:
             except Exception as e:
                 log.error("周期录屏失败: %s", e)
 
-    async def _send_video(self, video_bytes: bytes) -> None:
-        """按既有协议分块上传一段视频；确认只由统一 reader 读取。"""
+    async def _send_video(self, video_bytes: bytes, *, title_before: str = "") -> None:
+        """按既有协议分块上传一段视频；确认只由统一 reader 读取。
+
+        ``title_before`` 是录制开始前取得的窗口标题，与本地录屏语义一致：
+        本地也是在开录前取一次活动窗口标题，因为录到的画面属于那一段。
+        录制结束后再查一次仅用于诊断——若标题已变化，说明录制期间切换过
+        窗口，此时仍沿用录制前的标题，不把之后切到的窗口配给这段视频。
+        录制前取不到标题时退回录制后的结果；两者都取不到则为空标题。
+        """
         upload_id = uuid.uuid4().hex
         chunk_size = 5 * 1024 * 1024
+        title_after = await asyncio.to_thread(get_active_window_title)
+        if title_before and title_after and title_before != title_after:
+            log.debug(
+                "录制期间活动窗口发生变化（%s -> %s），沿用录制前标题",
+                title_before,
+                title_after,
+            )
+        window_title = title_before or title_after
         await self._exchange(
             {
                 "type": "video_meta",
                 "upload_id": upload_id,
                 "total_size": len(video_bytes),
                 "mime_type": "video/mp4",
-                "window_title": get_active_window_title(),
+                "window_title": window_title,
                 "client_id": self._config.client_id,
                 "duration_seconds": max(0, int(self._config.video_duration or 0)),
                 "timestamp": time.time(),
@@ -1267,6 +1693,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="显式启用周期截图上传；默认不周期上传，只在收到请求时采集。",
     )
+    window_group = parser.add_mutually_exclusive_group()
+    window_group.add_argument(
+        "--active-window-only",
+        action="store_true",
+        help="强制只截取活动窗口；覆盖插件端的「只截取活动窗口」配置。",
+    )
+    window_group.add_argument(
+        "--no-active-window",
+        action="store_true",
+        help="强制截取整个屏幕；覆盖插件端的「只截取活动窗口」配置。",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--screenshot-only", action="store_true", help="Only send screenshots")
     mode_group.add_argument("--video-only", action="store_true", help="Only send video clips")
@@ -1283,6 +1720,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # 必须在任何窗口/桌面 API 之前设置 DPI 感知，否则窗口矩形与屏幕位图坐标系不一致。
+    _ensure_dpi_awareness()
+
     parser = build_parser()
     args = parser.parse_args()
 

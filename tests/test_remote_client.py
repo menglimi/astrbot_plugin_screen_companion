@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -120,9 +121,17 @@ class AutoAckServer:
     回显；这里用 ``_pending_meta_request_id`` 复现同一语义。
     """
 
-    def __init__(self, socket: FakeServerSocket, *, auto_ack: bool = True) -> None:
+    def __init__(
+        self,
+        socket: FakeServerSocket,
+        *,
+        auto_ack: bool = True,
+        options: dict | None = None,
+    ) -> None:
         self.socket = socket
         self.auto_ack = auto_ack
+        #: 服务端在 capabilities_received 中下发的会话级默认。
+        self.options = dict(options or {})
         self.task: asyncio.Task | None = None
         self._pending_meta_request_id = ""
         self._pending_meta_seen = False
@@ -146,7 +155,10 @@ class AutoAckServer:
             msg_type = data.get("type", "")
             if msg_type == "client_capabilities":
                 # 能力协商必须始终完成，否则会话无法进入可请求状态。
-                await self.socket.push({"status": "capabilities_received"})
+                reply = {"status": "capabilities_received"}
+                if self.options:
+                    reply["options"] = dict(self.options)
+                await self.socket.push(reply)
                 continue
             if not self.auto_ack:
                 continue
@@ -239,13 +251,19 @@ def _request_ids_of(socket: FakeServerSocket, msg_type: str) -> list[str]:
 class SessionHarness:
     """统一的会话夹具：起服务端替身、跑会话、退出时完整清理。"""
 
-    def __init__(self, config: ClientConfig, *, auto_ack: bool = True,
-                 handshake: dict | None = None) -> None:
+    def __init__(
+        self,
+        config: ClientConfig,
+        *,
+        auto_ack: bool = True,
+        handshake: dict | None = None,
+        options: dict | None = None,
+    ) -> None:
         self.socket = FakeServerSocket(handshake)
         self.session = RemoteClientSession(
             self.socket, config, server_handshake=self.socket.handshake
         )
-        self.server = AutoAckServer(self.socket, auto_ack=auto_ack)
+        self.server = AutoAckServer(self.socket, auto_ack=auto_ack, options=options)
         self.runner: asyncio.Task | None = None
 
     async def start(self) -> "SessionHarness":
@@ -270,16 +288,36 @@ class _SyncCapture:
         self._results = list(results or [])
         self._error = error
 
-    def __call__(self, image_quality=70, deadline=None, *, include_stats=False):
-        self.calls.append({"quality": image_quality, "include_stats": include_stats})
+    def __call__(
+        self,
+        image_quality=70,
+        deadline=None,
+        *,
+        include_stats=False,
+        active_window_only=False,
+    ):
+        self.calls.append({
+            "quality": image_quality,
+            "include_stats": include_stats,
+            "active_window_only": active_window_only,
+        })
         if self._error is not None:
             raise self._error
+        scope = "window" if active_window_only else "fullscreen"
         if self._results:
             jpeg, title = self._results.pop(0)
             stats = {"cpu_percent": 1.0} if include_stats else {}
-            return jpeg, title, {"timestamp": time.time(), "system_stats": stats}
+            return jpeg, title, {
+                "timestamp": time.time(),
+                "system_stats": stats,
+                "capture_scope": scope,
+            }
         stats = {"cpu_percent": 1.0} if include_stats else {}
-        return JPEG, "Editor", {"timestamp": time.time(), "system_stats": stats}
+        return JPEG, "Editor", {
+            "timestamp": time.time(),
+            "system_stats": stats,
+            "capture_scope": scope,
+        }
 
 
 class _BlockingCapture:
@@ -290,11 +328,22 @@ class _BlockingCapture:
         self.release = threading.Event()
         self.calls = 0
 
-    def __call__(self, image_quality=70, deadline=None, *, include_stats=False):
+    def __call__(
+        self,
+        image_quality=70,
+        deadline=None,
+        *,
+        include_stats=False,
+        active_window_only=False,
+    ):
         self.calls += 1
         self.started.set()
         self.release.wait(timeout=10.0)
-        return JPEG, "Editor", {"timestamp": time.time(), "system_stats": {}}
+        return JPEG, "Editor", {
+            "timestamp": time.time(),
+            "system_stats": {},
+            "capture_scope": "fullscreen",
+        }
 
 
 class _BaseClientTest(unittest.IsolatedAsyncioTestCase):
@@ -534,11 +583,21 @@ class ClientCaptureTests(_BaseClientTest):
         harness = await SessionHarness(_make_config()).start()
         calls = {"count": 0}
 
-        def flaky_capture(image_quality=70, deadline=None, *, include_stats=False):
+        def flaky_capture(
+            image_quality=70,
+            deadline=None,
+            *,
+            include_stats=False,
+            active_window_only=False,
+        ):
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("截图权限被拒绝")
-            return JPEG, "Editor", {"timestamp": time.time(), "system_stats": {}}
+            return JPEG, "Editor", {
+                "timestamp": time.time(),
+                "system_stats": {},
+                "capture_scope": "fullscreen",
+            }
 
         try:
             with patch.object(remote_client, "capture_screenshot_context", flaky_capture):
@@ -1001,6 +1060,479 @@ class ClientVideoTests(_BaseClientTest):
             await session._close_session()
             session_task.cancel()
             await asyncio.gather(session_task, return_exceptions=True)
+
+
+class ClientActiveWindowTests(_BaseClientTest):
+    """活动窗口裁剪：几何查询、回退、范围上报与配置优先级。"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.deadline = time.monotonic() + 30.0
+
+    @staticmethod
+    def _window_stub(results):
+        """按顺序返回 (标题, 矩形, 是否成功)；用尽后保持最后一个。"""
+        remaining = list(results)
+
+        def fake(_timeout):
+            if len(remaining) > 1:
+                return remaining.pop(0)
+            return remaining[0]
+
+        return fake
+
+    def test_crop_uses_window_region_and_reports_window_scope(self) -> None:
+        regions: list = []
+        fullscreen: list = []
+
+        def fake_region(region, image_quality=70):
+            regions.append(tuple(region))
+            return JPEG
+
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([("Editor", (10, 20, 800, 600), True)]),
+            ),
+            patch.object(remote_client, "capture_screenshot_region", fake_region),
+            patch.object(
+                remote_client, "capture_screenshot",
+                lambda quality=70: fullscreen.append(1) or JPEG,
+            ),
+        ):
+            jpeg, title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        self.assertEqual(JPEG, jpeg)
+        self.assertEqual("Editor", title)
+        self.assertEqual("window", meta["capture_scope"])
+        self.assertEqual([(10, 20, 800, 600)], regions)
+        self.assertEqual([], fullscreen)
+
+    def test_missing_geometry_falls_back_to_fullscreen(self) -> None:
+        fullscreen: list = []
+
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([("Editor", None, True)]),
+            ),
+            patch.object(
+                remote_client,
+                "capture_screenshot_region",
+                lambda region, image_quality=70: pytest_fail_region(),
+            ),
+            patch.object(
+                remote_client, "capture_screenshot",
+                lambda quality=70: fullscreen.append(1) or JPEG,
+            ),
+        ):
+            jpeg, title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        # 窗口最小化或平台不支持时回退全屏，但必须如实标注。
+        self.assertEqual("fullscreen", meta["capture_scope"])
+        self.assertEqual("Editor", title)
+        self.assertEqual([1], fullscreen)
+
+    def test_region_capture_failure_falls_back_to_fullscreen(self) -> None:
+        def boom(region, image_quality=70):
+            raise RuntimeError("裁剪失败")
+
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([("Editor", (10, 20, 800, 600), True)]),
+            ),
+            patch.object(remote_client, "capture_screenshot_region", boom),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, _title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        self.assertEqual("fullscreen", meta["capture_scope"])
+
+    def test_window_moved_between_queries_triggers_single_recapture(self) -> None:
+        regions: list = []
+
+        def fake_region(region, image_quality=70):
+            regions.append(tuple(region))
+            return JPEG
+
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([
+                    ("W", (0, 0, 100, 100), True),
+                    ("W", (5, 5, 100, 100), True),
+                    ("W", (5, 5, 100, 100), True),
+                    ("W", (5, 5, 100, 100), True),
+                ]),
+            ),
+            patch.object(remote_client, "capture_screenshot_region", fake_region),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        # 矩形变化说明窗口移动过：补拍一次，使用稳定后的矩形与标题。
+        self.assertEqual(2, len(regions))
+        self.assertEqual((5, 5, 100, 100), regions[-1])
+        self.assertEqual("W", title)
+        self.assertEqual("window", meta["capture_scope"])
+
+    def test_unstable_window_twice_returns_empty_title(self) -> None:
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([
+                    ("A", (0, 0, 100, 100), True),
+                    ("B", (1, 1, 100, 100), True),
+                    ("C", (2, 2, 100, 100), True),
+                    ("D", (3, 3, 100, 100), True),
+                ]),
+            ),
+            patch.object(
+                remote_client,
+                "capture_screenshot_region",
+                lambda region, image_quality=70: JPEG,
+            ),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        # 两次都不稳定：保留最后一张图，但不附带确定的窗口标题。
+        self.assertEqual("", title)
+        self.assertEqual("window", meta["capture_scope"])
+
+    def test_disabled_cropping_keeps_title_only_path(self) -> None:
+        region_calls: list = []
+        title_calls: list = []
+
+        def fake_title(_timeout):
+            title_calls.append(1)
+            return "Editor", True
+
+        with (
+            patch.object(remote_client, "_query_active_window_title", fake_title),
+            patch.object(
+                remote_client,
+                "capture_screenshot_region",
+                lambda region, image_quality=70: region_calls.append(1) or JPEG,
+            ),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, title, meta = capture_screenshot_context(70, self.deadline)
+
+        self.assertEqual("Editor", title)
+        self.assertEqual("fullscreen", meta["capture_scope"])
+        self.assertEqual([], region_calls)
+        self.assertTrue(title_calls)
+
+    def test_rect_rules_reject_minimized_and_tiny_windows(self) -> None:
+        usable = remote_client._is_usable_rect
+        # Windows 最小化窗口被挪到 -32000 附近。
+        self.assertFalse(usable((-32000, -32000, 200, 200)))
+        # 过小的窗口不足以识别画面。
+        self.assertFalse(usable((10, 10, 5, 5)))
+        self.assertFalse(usable(None))
+        # 多显示器的负坐标是合法的。
+        self.assertTrue(usable((-1920, 0, 1280, 720)))
+        self.assertTrue(usable((0, 0, 1920, 1080)))
+
+    def test_negative_coordinates_are_passed_through_to_capture(self) -> None:
+        regions: list = []
+
+        with (
+            patch.object(
+                remote_client,
+                "_query_active_window",
+                self._window_stub([("Editor", (-1920, 100, 1280, 720), True)]),
+            ),
+            patch.object(
+                remote_client,
+                "capture_screenshot_region",
+                lambda region, image_quality=70: regions.append(tuple(region)) or JPEG,
+            ),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, _title, meta = capture_screenshot_context(
+                70, self.deadline, active_window_only=True
+            )
+
+        self.assertEqual([(-1920, 100, 1280, 720)], regions)
+        self.assertEqual("window", meta["capture_scope"])
+
+    def test_window_geometry_supported_on_desktop_platforms(self) -> None:
+        self.assertIn(
+            remote_client.sys.platform,
+            {"win32", "darwin", "linux"},
+        )
+        self.assertTrue(remote_client.window_geometry_supported())
+
+    def test_capture_scope_defaults_to_fullscreen_when_not_requested(self) -> None:
+        with (
+            patch.object(remote_client, "_query_active_window_title",
+                         lambda _t: ("Editor", True)),
+            patch.object(remote_client, "capture_screenshot", lambda quality=70: JPEG),
+        ):
+            _jpeg, _title, meta = capture_screenshot_context(70, self.deadline)
+
+        self.assertEqual("fullscreen", meta["capture_scope"])
+
+
+class ClientActiveWindowConfigTests(_BaseClientTest):
+    """配置优先级：客户端显式开关 > 本次请求字段 > 服务端会话默认。"""
+
+    def test_cli_flags_map_to_override(self) -> None:
+        forced_on = validate_config(
+            _parser_args(["--server", "ws://x", "--active-window-only"])
+        )
+        self.assertIs(True, forced_on.active_window_override)
+        forced_off = validate_config(
+            _parser_args(["--server", "ws://x", "--no-active-window"])
+        )
+        self.assertIs(False, forced_off.active_window_override)
+        follow = validate_config(_parser_args(["--server", "ws://x"]))
+        self.assertIsNone(follow.active_window_override)
+
+    def test_cli_window_flags_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(SystemExit):
+            _parser_args([
+                "--server", "ws://x", "--active-window-only", "--no-active-window",
+            ])
+
+    def test_describe_modes_reports_effective_sources(self) -> None:
+        follow = validate_config(_parser_args(["--server", "ws://x"]))
+        self.assertTrue(any("跟随插件端" in line for line in follow.describe_modes()))
+
+        forced = validate_config(
+            _parser_args(["--server", "ws://x", "--active-window-only"])
+        )
+        self.assertTrue(any("强制只截活动窗口" in line for line in forced.describe_modes()))
+
+    def test_resolution_precedence(self) -> None:
+        override = RemoteClientSession(
+            FakeServerSocket(), _make_config(active_window_override=True)
+        )
+        override._server_active_window = False
+        self.assertTrue(override._resolve_active_window(False))
+
+        follow = RemoteClientSession(FakeServerSocket(), _make_config())
+        follow._server_active_window = True
+        # 会话默认生效；逐次请求字段优先于会话默认。
+        self.assertTrue(follow._resolve_active_window(None))
+        self.assertFalse(follow._resolve_active_window(False))
+        self.assertTrue(follow._resolve_active_window(True))
+
+
+class ClientActiveWindowSessionTests(_BaseClientTest):
+    """会话层：能力声明、请求字段与周期推送的范围来源。"""
+
+    async def test_capability_declares_active_window_support(self) -> None:
+        harness = await SessionHarness(_make_config()).start()
+        try:
+            capabilities = harness.socket.of_type("client_capabilities")[0]["capabilities"]
+            self.assertIn("request_screenshot", capabilities)
+            self.assertIn("capture_active_window", capabilities)
+        finally:
+            await harness.stop()
+
+    async def test_video_only_client_does_not_declare_active_window(self) -> None:
+        config = _make_config(
+            screenshot_enabled=False, video_only=True, video_enabled=True
+        )
+        harness = await SessionHarness(config).start()
+        try:
+            capabilities = harness.socket.of_type("client_capabilities")[0]["capabilities"]
+            self.assertEqual([], capabilities)
+        finally:
+            await harness.stop()
+
+    async def test_request_flag_enables_crop_and_upload_reports_scope(self) -> None:
+        harness = await SessionHarness(_make_config()).start()
+        capture = _SyncCapture()
+        try:
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                await harness.socket.push({
+                    "type": "request_screenshot",
+                    "request_id": "crop-1",
+                    "capture_active_window": True,
+                })
+                await _wait_for(lambda: harness.socket.of_type("screenshot_meta"))
+                meta = harness.socket.of_type("screenshot_meta")[0]
+                self.assertTrue(capture.calls[0]["active_window_only"])
+                self.assertEqual("window", meta.get("capture_scope"))
+        finally:
+            await harness.stop()
+
+    async def test_request_without_flag_keeps_fullscreen(self) -> None:
+        harness = await SessionHarness(_make_config()).start()
+        capture = _SyncCapture()
+        try:
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                await harness.socket.push({
+                    "type": "request_screenshot",
+                    "request_id": "plain-1",
+                })
+                await _wait_for(lambda: harness.socket.of_type("screenshot_meta"))
+                meta = harness.socket.of_type("screenshot_meta")[0]
+                self.assertFalse(capture.calls[0]["active_window_only"])
+                self.assertEqual("fullscreen", meta.get("capture_scope"))
+        finally:
+            await harness.stop()
+
+    async def test_server_handshake_option_drives_on_demand_requests(self) -> None:
+        harness = await SessionHarness(
+            _make_config(), options={"capture_active_window": True}
+        ).start()
+        capture = _SyncCapture()
+        try:
+            self.assertTrue(harness.session._server_active_window)
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                # 请求本身不带字段：应回落到握手下发的会话默认。
+                await harness.socket.push({
+                    "type": "request_screenshot",
+                    "request_id": "opt-1",
+                })
+                await _wait_for(lambda: harness.socket.of_type("screenshot_meta"))
+                self.assertTrue(capture.calls[0]["active_window_only"])
+        finally:
+            await harness.stop()
+
+    async def test_server_handshake_option_drives_push_mode(self) -> None:
+        harness = await SessionHarness(
+            _make_config(push_enabled=True, interval=0.1),
+            options={"capture_active_window": True},
+        ).start()
+        capture = _SyncCapture()
+        try:
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                await _wait_for(lambda: capture.calls, timeout=5.0)
+                self.assertTrue(capture.calls[0]["active_window_only"])
+        finally:
+            await harness.stop()
+
+    async def test_client_override_beats_server_option(self) -> None:
+        harness = await SessionHarness(
+            _make_config(active_window_override=False),
+            options={"capture_active_window": True},
+        ).start()
+        capture = _SyncCapture()
+        try:
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                await harness.socket.push({
+                    "type": "request_screenshot",
+                    "request_id": "ovr-1",
+                    "capture_active_window": True,
+                })
+                await _wait_for(lambda: harness.socket.of_type("screenshot_meta"))
+                # 客户端显式关闭时，服务端要求也不应改变本机行为。
+                self.assertFalse(capture.calls[0]["active_window_only"])
+                meta = harness.socket.of_type("screenshot_meta")[0]
+                self.assertEqual("fullscreen", meta.get("capture_scope"))
+        finally:
+            await harness.stop()
+
+    async def test_bundle_upload_also_reports_scope(self) -> None:
+        harness = await SessionHarness(_make_config(binary=False)).start()
+        capture = _SyncCapture()
+        try:
+            with patch.object(remote_client, "capture_screenshot_context", capture):
+                await harness.socket.push({
+                    "type": "request_screenshot",
+                    "request_id": "json-1",
+                    "capture_active_window": True,
+                })
+                await _wait_for(lambda: harness.socket.of_type("screenshot_bundle"))
+                bundle = harness.socket.of_type("screenshot_bundle")[0]
+                self.assertEqual("window", bundle.get("capture_scope"))
+        finally:
+            await harness.stop()
+
+
+def pytest_fail_region():
+    raise AssertionError("未提供可用矩形时不应走裁剪路径")
+
+
+class ClientVideoTitlePairingTests(unittest.IsolatedAsyncioTestCase):
+    """录屏窗口标题与本地语义对齐：以录制前的活动窗口为准。"""
+
+    async def _run_send_video(self, *, title_before: str, titles_after: list[str]) -> dict:
+        """驱动一次 _send_video，返回上传的 video_meta。"""
+        socket = FakeServerSocket()
+        session = RemoteClientSession(
+            socket, _make_config(), server_handshake=socket.handshake
+        )
+        session_task = asyncio.ensure_future(session.run())
+        remaining = list(titles_after)
+
+        def fake_title() -> str:
+            return remaining.pop(0) if remaining else ""
+
+        try:
+            await _wait_for(
+                lambda: "client_capabilities" in socket.types(), timeout=3.0
+            )
+            await socket.push({"status": "capabilities_received"})
+            await _wait_for(lambda: session.negotiated, timeout=3.0)
+
+            with patch.object(remote_client, "get_active_window_title", fake_title):
+                video_task = asyncio.ensure_future(
+                    session._send_video(b"video", title_before=title_before)
+                )
+                await _wait_for(lambda: socket.of_type("video_meta"), timeout=3.0)
+                meta = socket.of_type("video_meta")[0]
+                upload_id = meta["upload_id"]
+
+                await socket.push({"status": "video_ready", "upload_id": upload_id})
+                await _wait_for(lambda: socket.of_type("video_chunk"), timeout=3.0)
+                await socket.push({
+                    "status": "video_chunk_received",
+                    "upload_id": upload_id,
+                    "index": 0,
+                })
+                await _wait_for(lambda: socket.of_type("video_complete"), timeout=3.0)
+                await socket.push({"status": "video_complete", "upload_id": upload_id})
+                await asyncio.wait_for(video_task, timeout=3.0)
+            return meta
+        finally:
+            await session._close_session()
+            session_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await session_task
+
+    async def test_title_before_recording_wins_when_window_changed(self) -> None:
+        """录制期间切窗口时，不把之后切到的窗口配给这段视频。"""
+        meta = await self._run_send_video(
+            title_before="Editor", titles_after=["Browser"]
+        )
+
+        self.assertEqual("Editor", meta.get("window_title"))
+
+    async def test_unchanged_title_is_reused(self) -> None:
+        meta = await self._run_send_video(
+            title_before="Editor", titles_after=["Editor"]
+        )
+
+        self.assertEqual("Editor", meta.get("window_title"))
+
+    async def test_falls_back_to_after_title_when_before_is_empty(self) -> None:
+        """录制前取不到标题时，退回录制后的结果，而不是发送空标题。"""
+        meta = await self._run_send_video(title_before="", titles_after=["Editor"])
+
+        self.assertEqual("Editor", meta.get("window_title"))
 
 
 class ClientNegotiationTests(_BaseClientTest):

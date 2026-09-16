@@ -1145,7 +1145,34 @@ class ScreenCompanionRuntimeMixin:
         async with self._screen_recording_lock:
             await asyncio.to_thread(self._stop_screen_recording_sync)
 
+    def _get_remote_active_window_info(self) -> tuple[str, None] | None:
+        """远程模式下的活动窗口信息：只读客户端随帧上报的窗口标题。
+
+        返回 ``None`` 表示当前没有可用远程帧。调用方必须把它当作"查不到"，
+        不能回落到服务器本机的窗口查询——那会把服务器桌面说成用户桌面。
+
+        ``region`` 固定为 ``None``：远程截图的活动窗口裁剪由客户端完成，
+        服务端拿不到、也不应该再拿矩形去裁剪同一张图。本方法只读缓存，
+        不触发截图。
+        """
+        receiver = getattr(self, "_remote_receiver", None)
+        if receiver is None:
+            return None
+        title = str(getattr(receiver, "latest_window_title", "") or "").strip()
+        if not title:
+            return None
+        return title, None
+
     def _get_active_window_info(self) -> tuple[str, tuple[int, int, int, int] | None]:
+        # 远程模式下用户桌面在另一台机器上，必须使用客户端随帧上报的窗口信息；
+        # 这里读取服务器本机窗口只会得到与用户无关的结果。
+        if self._get_runtime_flag("remote_mode"):
+            remote_info = self._get_remote_active_window_info()
+            if remote_info is None:
+                # 没有可用远程帧时如实返回空结果，交由调用方的既有降级逻辑处理。
+                return "", None
+            return remote_info
+
         title = ""
         region = None
         if sys.platform != "win32":

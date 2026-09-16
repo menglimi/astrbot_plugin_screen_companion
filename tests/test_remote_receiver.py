@@ -11,10 +11,11 @@ import json
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot_plugin_screen_companion.core.media import ScreenCompanionMediaMixin
 from astrbot_plugin_screen_companion.core.remote_receiver import (
+    CAPABILITY_CAPTURE_ACTIVE_WINDOW,
     CAPABILITY_REQUEST_SCREENSHOT,
     DEFAULT_REQUEST_TIMEOUT,
     META_TRANSACTION_TTL,
@@ -111,22 +112,31 @@ class ScriptedWebSocket(FakeWebSocket):
         await asyncio.sleep(self._keep_open_seconds)
 
 
-async def _authenticate(receiver: RemoteScreenReceiver, websocket: FakeWebSocket) -> None:
-    """以 v2 客户端身份完成认证与能力协商。"""
+async def _authenticate(
+    receiver: RemoteScreenReceiver,
+    websocket: FakeWebSocket,
+    *,
+    capabilities=None,
+) -> dict:
+    """以 v2 客户端身份完成认证与能力协商，返回确认消息。"""
     receiver._connected_clients.add(websocket)
+    declared = (
+        [CAPABILITY_REQUEST_SCREENSHOT] if capabilities is None else list(capabilities)
+    )
     await receiver._process_message(
         json.dumps({
             "type": "client_capabilities",
             "protocol_version": PROTOCOL_VERSION,
             "client_id": "desktop",
-            "capabilities": [CAPABILITY_REQUEST_SCREENSHOT],
+            "capabilities": declared,
         }),
         websocket,
     )
-    await websocket.next_message(timeout=1.0)  # capabilities_received
+    reply = await websocket.next_message(timeout=1.0)  # capabilities_received
     # 清空握手痕迹，使后续断言只观察被测动作。
     websocket.sent.clear()
     websocket.reset_send_tracking()
+    return reply
 
 
 async def _start_request(
@@ -160,11 +170,14 @@ async def _send_binary_frame(
     request_id: str = "",
     image: bytes = JPEG,
     title: str = "Editor",
+    capture_scope: str = "",
 ) -> tuple[dict, dict]:
     """发送一帧「元数据 + 二进制」，返回两次确认消息。"""
     payload = {"type": "screenshot_meta", "window_title": title, "client_id": "desktop"}
     if request_id:
         payload["request_id"] = request_id
+    if capture_scope:
+        payload["capture_scope"] = capture_scope
     await receiver._process_message(json.dumps(payload), websocket)
     meta_ack = await websocket.next_message(timeout=1.0)
     await receiver._process_message(image, websocket)
@@ -638,6 +651,206 @@ class RemoteReceiverRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("protocol_error", reply.get("code"))
         self.assertEqual({}, self.receiver._pending_screenshot_meta)
         await _wait_until_closed(websocket)
+
+
+class RemoteReceiverActiveWindowTests(unittest.IsolatedAsyncioTestCase):
+    """活动窗口裁剪的协议协商、命令下发与实际范围记录。"""
+
+    async def test_request_carries_flag_for_capable_client(self) -> None:
+        receiver = RemoteScreenReceiver(capture_active_window=True)
+        websocket = FakeWebSocket()
+        await _authenticate(
+            receiver,
+            websocket,
+            capabilities=[
+                CAPABILITY_REQUEST_SCREENSHOT,
+                CAPABILITY_CAPTURE_ACTIVE_WINDOW,
+            ],
+        )
+
+        task, command = await _start_request(receiver, websocket)
+
+        self.assertTrue(command.get("capture_active_window"))
+        self.assertTrue(receiver.has_active_window_capable_client)
+        await _send_binary_frame(
+            receiver,
+            websocket,
+            request_id=command["request_id"],
+            capture_scope="window",
+        )
+        await asyncio.wait_for(task, timeout=2.0)
+
+    async def test_request_omits_flag_for_client_without_capability(self) -> None:
+        receiver = RemoteScreenReceiver(capture_active_window=True)
+        websocket = FakeWebSocket()
+        await _authenticate(receiver, websocket)  # 只声明按需截图能力
+
+        task, command = await _start_request(receiver, websocket)
+
+        # 不能向不支持的客户端下发范围要求，否则它只能忽略或报错。
+        self.assertNotIn("capture_active_window", command)
+        self.assertFalse(receiver.has_active_window_capable_client)
+        await _send_binary_frame(receiver, websocket, request_id=command["request_id"])
+        await asyncio.wait_for(task, timeout=2.0)
+
+    async def test_request_omits_flag_when_server_setting_is_off(self) -> None:
+        receiver = RemoteScreenReceiver(capture_active_window=False)
+        websocket = FakeWebSocket()
+        await _authenticate(
+            receiver,
+            websocket,
+            capabilities=[
+                CAPABILITY_REQUEST_SCREENSHOT,
+                CAPABILITY_CAPTURE_ACTIVE_WINDOW,
+            ],
+        )
+
+        task, command = await _start_request(receiver, websocket)
+
+        self.assertNotIn("capture_active_window", command)
+        await _send_binary_frame(receiver, websocket, request_id=command["request_id"])
+        await asyncio.wait_for(task, timeout=2.0)
+
+    async def test_capabilities_reply_carries_server_option(self) -> None:
+        receiver = RemoteScreenReceiver(capture_active_window=True)
+        websocket = FakeWebSocket()
+        reply = await _authenticate(
+            receiver,
+            websocket,
+            capabilities=[
+                CAPABILITY_REQUEST_SCREENSHOT,
+                CAPABILITY_CAPTURE_ACTIVE_WINDOW,
+            ],
+        )
+
+        self.assertEqual(
+            {"capture_active_window": True}, reply.get("options")
+        )
+
+    async def test_capabilities_reply_reports_disabled_option(self) -> None:
+        receiver = RemoteScreenReceiver(capture_active_window=False)
+        websocket = FakeWebSocket()
+        reply = await _authenticate(receiver, websocket)
+
+        self.assertEqual(
+            {"capture_active_window": False}, reply.get("options")
+        )
+
+    async def test_capture_scope_is_recorded_in_cached_meta(self) -> None:
+        receiver = RemoteScreenReceiver()
+        websocket = FakeWebSocket()
+        await _authenticate(receiver, websocket)
+
+        await _send_binary_frame(
+            receiver,
+            websocket,
+            title="Editor",
+            capture_scope="window",
+        )
+
+        _image, _title, meta = await receiver.get_latest_screenshot()
+        self.assertEqual("window", meta.get("capture_scope"))
+
+    async def test_capture_scope_is_recorded_for_bundle(self) -> None:
+        receiver = RemoteScreenReceiver()
+        websocket = FakeWebSocket()
+        await _authenticate(receiver, websocket)
+
+        await receiver._process_message(
+            json.dumps({
+                "type": "screenshot_bundle",
+                "window_title": "Bundle",
+                "capture_scope": "fullscreen",
+                "image": base64.b64encode(JPEG).decode("ascii"),
+            }),
+            websocket,
+        )
+        await websocket.next_message(timeout=1.0)
+
+        _image, _title, meta = await receiver.get_latest_screenshot()
+        self.assertEqual("fullscreen", meta.get("capture_scope"))
+
+    async def test_legacy_bare_jpeg_has_no_scope(self) -> None:
+        receiver = RemoteScreenReceiver()
+        websocket = FakeWebSocket()
+        receiver._connected_clients.add(websocket)
+
+        await receiver._process_message(JPEG, websocket)
+        await websocket.next_message(timeout=1.0)
+
+        _image, _title, meta = await receiver.get_latest_screenshot()
+        # 旧客户端不声明范围，不能替它编造一个值。
+        self.assertFalse(meta.get("capture_scope"))
+
+
+class RemoteReceiverCropWarningTests(unittest.IsolatedAsyncioTestCase):
+    """插件承诺窗口裁剪但客户端回退全屏时必须留下可排查记录。"""
+
+    @staticmethod
+    def _make_plugin(receiver) -> ScreenCompanionMediaMixin:
+        plugin = ScreenCompanionMediaMixin()
+        plugin.remote_mode = True
+        plugin.capture_active_window = True
+        plugin.remote_screenshot_max_age = 60
+        plugin._remote_receiver = receiver
+        plugin._get_runtime_flag = lambda name, default=False: bool(
+            getattr(plugin, name, default)
+        )
+        plugin._get_capture_context_timeout = lambda media_kind=None: 20.0
+        return plugin
+
+    async def test_fullscreen_fallback_is_warned_and_rate_limited(self) -> None:
+        receiver = SimpleNamespace(
+            has_request_capable_client=True,
+            request_screenshot=AsyncMock(
+                return_value=(JPEG, "Editor", {"capture_scope": "fullscreen"})
+            ),
+        )
+        plugin = self._make_plugin(receiver)
+
+        with patch(
+            "astrbot_plugin_screen_companion.core.media.logger.warning"
+        ) as warn_mock:
+            await plugin._capture_screen_bytes()
+            await plugin._capture_screen_bytes()
+
+        # 降级要可见，但不能每次识屏都刷屏。
+        self.assertEqual(1, warn_mock.call_count)
+        self.assertIn("全屏截图", warn_mock.call_args.args[0])
+
+    async def test_window_scope_does_not_warn(self) -> None:
+        receiver = SimpleNamespace(
+            has_request_capable_client=True,
+            request_screenshot=AsyncMock(
+                return_value=(JPEG, "Editor", {"capture_scope": "window"})
+            ),
+        )
+        plugin = self._make_plugin(receiver)
+
+        with patch(
+            "astrbot_plugin_screen_companion.core.media.logger.warning"
+        ) as warn_mock:
+            await plugin._capture_screen_bytes()
+
+        warn_mock.assert_not_called()
+
+    async def test_warning_skipped_when_setting_is_off(self) -> None:
+        receiver = SimpleNamespace(
+            has_request_capable_client=True,
+            request_screenshot=AsyncMock(
+                return_value=(JPEG, "Editor", {"capture_scope": "fullscreen"})
+            ),
+        )
+        plugin = self._make_plugin(receiver)
+        plugin.capture_active_window = False
+
+        with patch(
+            "astrbot_plugin_screen_companion.core.media.logger.warning"
+        ) as warn_mock:
+            await plugin._capture_screen_bytes()
+
+        # 用户没要求裁剪时全屏是正常结果，不该报警告。
+        warn_mock.assert_not_called()
 
 
 class RemoteReceiverCacheCompatTests(unittest.IsolatedAsyncioTestCase):

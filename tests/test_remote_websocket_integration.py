@@ -17,6 +17,7 @@ import websockets
 from websockets.asyncio.server import serve
 
 from astrbot_plugin_screen_companion.core.remote_receiver import (
+    CAPABILITY_CAPTURE_ACTIVE_WINDOW,
     CAPABILITY_REQUEST_SCREENSHOT,
     PROTOCOL_VERSION,
     RemoteScreenReceiver,
@@ -36,9 +37,12 @@ class _ReceiverHarness:
         *,
         request_timeout: float = 5.0,
         auth_token: str = AUTH_TOKEN,
+        capture_active_window: bool = False,
     ) -> None:
         self.receiver = RemoteScreenReceiver(
-            auth_token=auth_token, request_timeout=request_timeout
+            auth_token=auth_token,
+            request_timeout=request_timeout,
+            capture_active_window=capture_active_window,
         )
         self.server = None
         self.port = 0
@@ -96,11 +100,14 @@ async def _upload_frame(
     request_id: str = "",
     image: bytes = JPEG,
     title: str = "Editor",
+    capture_scope: str = "",
 ) -> tuple[dict, dict]:
     """上传一整帧并返回两次确认。"""
     payload = {"type": "screenshot_meta", "window_title": title, "client_id": "desktop"}
     if request_id:
         payload["request_id"] = request_id
+    if capture_scope:
+        payload["capture_scope"] = capture_scope
     await websocket.send(json.dumps(payload))
     meta_ack = await _recv_json(websocket)
     await websocket.send(image)
@@ -397,6 +404,92 @@ class RemoteWebSocketIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_tcp_port_is_bound_to_loopback_only(self) -> None:
         host = self.harness.server.sockets[0].getsockname()[0]
         self.assertEqual("127.0.0.1", host)
+
+
+class RemoteWebSocketActiveWindowTests(unittest.IsolatedAsyncioTestCase):
+    """I09～I11：活动窗口裁剪在真实连接上的协商与上报。"""
+
+    async def asyncSetUp(self) -> None:
+        self.opened: list = []
+
+    async def asyncTearDown(self) -> None:
+        for websocket in self.opened:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        if getattr(self, "harness", None) is not None:
+            await self.harness.stop()
+
+    async def _start(self, *, capture_active_window: bool) -> "_ReceiverHarness":
+        harness = await _ReceiverHarness(
+            capture_active_window=capture_active_window
+        ).start()
+        self.harness = harness
+        websocket, _handshake = await harness.connect()
+        self.opened.append(websocket)
+        return harness, websocket
+
+    async def test_i09_crop_flag_and_scope_round_trip(self) -> None:
+        harness, websocket = await self._start(capture_active_window=True)
+        reply = await _negotiate(
+            websocket,
+            capabilities=[
+                CAPABILITY_REQUEST_SCREENSHOT,
+                CAPABILITY_CAPTURE_ACTIVE_WINDOW,
+            ],
+        )
+        self.assertEqual({"capture_active_window": True}, reply.get("options"))
+
+        task = asyncio.ensure_future(harness.receiver.request_screenshot())
+        command = await _recv_json(websocket)
+        self.assertTrue(command.get("capture_active_window"))
+
+        await _upload_frame(
+            websocket,
+            request_id=command["request_id"],
+            capture_scope="window",
+        )
+        image, title, meta = await asyncio.wait_for(task, timeout=5.0)
+        self.assertEqual(JPEG, image)
+        self.assertEqual("Editor", title)
+        # 实际范围随帧一起入库，便于排查"开关生效"与"回退全屏"两种情况。
+        self.assertEqual("window", meta.get("capture_scope"))
+
+    async def test_i10_client_without_capability_gets_no_flag(self) -> None:
+        harness, websocket = await self._start(capture_active_window=True)
+        await _negotiate(websocket)  # 只声明按需截图能力
+
+        task = asyncio.ensure_future(harness.receiver.request_screenshot())
+        command = await _recv_json(websocket)
+        self.assertNotIn("capture_active_window", command)
+
+        await _upload_frame(websocket, request_id=command["request_id"])
+        _image, _title, meta = await asyncio.wait_for(task, timeout=5.0)
+        self.assertFalse(meta.get("capture_scope"))
+
+    async def test_i11_fullscreen_fallback_is_reported_honestly(self) -> None:
+        harness, websocket = await self._start(capture_active_window=True)
+        await _negotiate(
+            websocket,
+            capabilities=[
+                CAPABILITY_REQUEST_SCREENSHOT,
+                CAPABILITY_CAPTURE_ACTIVE_WINDOW,
+            ],
+        )
+
+        task = asyncio.ensure_future(harness.receiver.request_screenshot())
+        command = await _recv_json(websocket)
+        self.assertTrue(command.get("capture_active_window"))
+
+        # 客户端声明有能力但本次矩形不可用：必须回退全屏并如实标注。
+        await _upload_frame(
+            websocket,
+            request_id=command["request_id"],
+            capture_scope="fullscreen",
+        )
+        _image, _title, meta = await asyncio.wait_for(task, timeout=5.0)
+        self.assertEqual("fullscreen", meta.get("capture_scope"))
 
 
 if __name__ == "__main__":

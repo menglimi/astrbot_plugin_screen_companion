@@ -124,7 +124,7 @@
   "enable_local_browser_history": {
     "description": "允许读取本地浏览器历史",
     "type": "bool",
-    "hint": "允许从本机 Chromium 浏览器历史中读取最近访问记录。更敏感，不需要就别开。",
+    "hint": "允许从本机 Chromium 浏览器历史中读取最近访问记录。更敏感，不需要就别开。远程模式下该功能不可用：读取的会是服务器浏览器，因此不会返回任何记录。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -214,7 +214,7 @@
   "capture_active_window": {
     "description": "只截取活动窗口",
     "type": "bool",
-    "hint": "截图模式下只截当前窗口，不截全屏。",
+    "hint": "截图模式下只截当前窗口，不截全屏。远程模式下由客户端执行裁剪：需要客户端升级到支持该能力并声明能力；窗口最小化、平台不支持或几何查询失败时会回退为全屏，并在日志中记录一次提示。",
     "default": false,
     "condition": {
       "enabled": true,
@@ -475,7 +475,7 @@
   "enable_mic_monitor": {
     "description": "启用麦克风监听",
     "type": "bool",
-    "hint": "开启后会监听麦克风音量，超过阈值时可触发一次识屏。",
+    "hint": "开启后会监听麦克风音量，超过阈值时可触发一次识屏。远程模式下不可用：监听的是用户电脑的麦克风，而客户端尚未上报音量，因此不会启动监听。",
     "default": false,
     "condition": {
       "enabled": true
@@ -504,7 +504,7 @@
   "enable_input_stats": {
     "description": "启用本地输入统计",
     "type": "bool",
-      "hint": "开启后统计键盘输入，用来判断活跃度和生成回顾。为避免 Windows 鼠标钩子卡顿，默认不监听鼠标。",
+      "hint": "开启后统计键盘输入，用来判断活跃度和生成回顾。为避免 Windows 鼠标钩子卡顿，默认不监听鼠标。远程模式下不可用：客户端尚未上报输入统计，不会去监听服务器的键鼠。",
     "default": false,
     "condition": {
       "enabled": true
@@ -513,7 +513,7 @@
   "enable_background_activity_tracking": {
     "description": "启用独立活动轨迹采集",
     "type": "bool",
-    "hint": "开启后会定时记录当前活动窗口，即使自动观察没开也会记录。",
+    "hint": "开启后会定时记录当前活动窗口，即使自动观察没开也会记录。远程模式下窗口标题只在识屏时更新，因此轨迹随识屏更新、时间分辨率低于本机模式。",
     "default": false,
     "condition": {
       "enabled": true

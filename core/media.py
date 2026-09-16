@@ -1946,6 +1946,15 @@ class ScreenCompanionMediaMixin:
             return
         if not self.enable_mic_monitor or not self.running:
             return
+        if self._get_runtime_flag("remote_mode"):
+            # 远程模式下用户麦克风在另一台机器上，服务器监听自身麦克风既不会
+            # 被用户说话触发，也会把服务器环境音混进触发链路。客户端尚未上报
+            # 音量，这里明确不启动监听任务。
+            logger.warning(
+                "远程模式下不会启动本机麦克风监听：客户端尚未上报麦克风音量，"
+                "「麦克风音量触发识屏」在远程模式暂不可用，请改用自动观察或手动识屏。"
+            )
+            return
         task = self._safe_create_task(self._mic_monitor_task(), name="mic_monitor")
         self._mic_monitor_background_task = task
         if task not in self.background_tasks:
@@ -2488,22 +2497,34 @@ class ScreenCompanionMediaMixin:
 
                 # 检测系统负载
                 system_high_load = False
-                try:
-                    import psutil
+                if self._get_runtime_flag("remote_mode"):
+                    # 远程模式下"用户设备负载"只能来自客户端随帧上报的统计；
+                    # 服务器负载与用户电脑无关，不能用来决定是否触发识屏。
+                    # 按需路径默认不采样统计，因此这里通常没有数据、不触发高负载分支。
+                    remote_status = self._get_remote_system_status_prompt()
+                    if remote_status is not None:
+                        _remote_prompt, system_high_load = remote_status
+                        if system_high_load:
+                            logger.info(
+                                f"[任务 {task_id}] 客户端上报系统负载较高，将触发一次识屏"
+                            )
+                else:
+                    try:
+                        import psutil
 
-                    cpu_percent = psutil.cpu_percent(interval=1)
-                    memory = psutil.virtual_memory()
-                    memory_percent = memory.percent
+                        cpu_percent = psutil.cpu_percent(interval=1)
+                        memory = psutil.virtual_memory()
+                        memory_percent = memory.percent
 
-                    if cpu_percent > 80 or memory_percent > 80:
-                        system_high_load = True
-                        logger.info(
-                            f"[任务 {task_id}] 系统资源占用较高: CPU={cpu_percent}%, 内存={memory_percent}%"
-                        )
-                except ImportError:
-                    logger.debug(f"[任务 {task_id}] 未安装 psutil，跳过系统负载检测")
-                except Exception as e:
-                    logger.debug(f"[任务 {task_id}] 系统状态检测失败: {e}")
+                        if cpu_percent > 80 or memory_percent > 80:
+                            system_high_load = True
+                            logger.info(
+                                f"[任务 {task_id}] 系统资源占用较高: CPU={cpu_percent}%, 内存={memory_percent}%"
+                            )
+                    except ImportError:
+                        logger.debug(f"[任务 {task_id}] 未安装 psutil，跳过系统负载检测")
+                    except Exception as e:
+                        logger.debug(f"[任务 {task_id}] 系统状态检测失败: {e}")
 
                 # 高负载时强制触发一次识屏
                 change_snapshot = self._build_auto_screen_change_snapshot(
@@ -2959,8 +2980,12 @@ class ScreenCompanionMediaMixin:
             except ImportError:
                 missing_libs.append("pygetwindow")
 
-        # 检查麦克风监控依赖
-        if check_mic and self.enable_mic_monitor:
+        # 检查麦克风监控依赖（远程模式下监听在用户机器上，不检查服务器依赖）
+        if (
+            check_mic
+            and self.enable_mic_monitor
+            and not self._get_runtime_flag("remote_mode")
+        ):
             missing_libs.extend(self._get_missing_mic_dependencies())
 
         if missing_libs:
@@ -3451,6 +3476,27 @@ class ScreenCompanionMediaMixin:
             budget = min(budget, max(1.0, outer - 5.0))
         return float(max(1.0, budget))
 
+    def _warn_if_window_crop_missed(self, meta: dict[str, Any] | None) -> None:
+        """插件要求只截活动窗口、但客户端实际返回全屏时如实记录一次。
+
+        远程模式下裁剪由客户端执行；旧客户端、平台不支持或窗口矩形不可用时
+        会回退全屏。这属于降级而不是失败，但必须留下可排查的记录，避免用户
+        以为开关已经生效。为避免刷屏，同一小时内只提示一次。
+        """
+        if not getattr(self, "capture_active_window", False):
+            return
+        if str((meta or {}).get("capture_scope", "") or "") == "window":
+            return
+        now = time.time()
+        last = float(getattr(self, "_window_crop_warned_at", 0.0) or 0.0)
+        if now - last < 3600.0:
+            return
+        self._window_crop_warned_at = now
+        logger.warning(
+            "远程客户端本次返回的是全屏截图，未按「只截取活动窗口」裁剪。"
+            "请确认客户端已升级、窗口未最小化，且系统支持活动窗口几何查询。"
+        )
+
     async def _capture_screen_bytes(self, *, force_fresh_capture: bool = False):
         """返回截图字节流与来源标签。
 
@@ -3473,9 +3519,10 @@ class ScreenCompanionMediaMixin:
 
             if receiver.has_request_capable_client:
                 # 新版客户端：只要识屏需要画面，就请求一张本次采集的新图。
-                image_bytes, window_title, _meta = await receiver.request_screenshot(
+                image_bytes, window_title, meta = await receiver.request_screenshot(
                     timeout=self._get_remote_screenshot_timeout()
                 )
+                self._warn_if_window_crop_missed(meta)
                 return image_bytes, window_title or "远程客户端截图"
 
             if force_fresh_capture:
@@ -3864,6 +3911,28 @@ class ScreenCompanionMediaMixin:
             except OSError:
                 pass
 
+    async def _capture_command_recording_context(self) -> dict[str, Any]:
+        """`/kpr` 等手动录屏入口的采集上下文。
+
+        远程模式不提供按需录屏：客户端只能按 ``--video`` 周期上传短片，
+        服务端无法命令它立刻补录一段。因此这里复用最近一次已上传的录屏，
+        并把它标注为"最近一段"而不是"刚刚录制"，避免把旧素材说成现拍画面。
+        本地模式行为不变，仍然即时录制一段新短片。
+        """
+        if self._get_runtime_flag("remote_mode"):
+            context = await self._capture_recording_context()
+            window_title = str(context.get("active_window_title", "") or "")
+            context["source_label"] = (
+                f"{window_title}（远程客户端最近上传的录屏）"
+                if window_title
+                else "远程客户端最近上传的录屏"
+            )
+            context["remote_cached_recording"] = True
+            return context
+        return await self._capture_one_shot_recording_context(
+            self._get_recording_duration_seconds()
+        )
+
     async def _capture_recognition_context(
         self,
         *,
@@ -3891,7 +3960,8 @@ class ScreenCompanionMediaMixin:
         if self._get_runtime_flag("remote_mode"):
             if self._use_screen_recording_mode():
                 return await self._capture_recording_context()
-            return await self._capture_screenshot_context()
+            # 主动观察同样需要"这一刻"的画面，显式要求新帧而不是依赖实现巧合。
+            return await self._capture_screenshot_context(force_fresh_capture=True)
         if self._use_screen_recording_mode():
             return await self._capture_one_shot_recording_context(
                 self._get_recording_duration_seconds()
@@ -5114,8 +5184,89 @@ class ScreenCompanionMediaMixin:
             return holiday_prompt
         return ""
 
+    @staticmethod
+    def _coerce_stat_percent(value: Any) -> float | None:
+        """把系统统计里的一个百分比字段收敛为 0~100 的浮点数。
+
+        缺字段、非数值、NaN 和越界值一律返回 ``None``，表示"这项没有可信数据"。
+        远程客户端可能因为平台差异少报字段，不能用默认值把缺失伪装成 0。
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            percent = float(value)
+        except (TypeError, ValueError):
+            return None
+        if percent != percent or percent in (float("inf"), float("-inf")):
+            return None
+        if percent < 0.0 or percent > 100.0:
+            return None
+        return percent
+
+    def _build_system_status_prompt(
+        self,
+        *,
+        cpu_percent: float | None,
+        memory_percent: float | None,
+        battery_percent: float | None,
+    ) -> tuple[str, bool]:
+        """按阈值把系统统计翻译成提示词；本地与远程分支共用同一套判定。
+
+        全部输入都可能为 ``None``（该平台没有这项统计）。没有任何可信数据时
+        必须返回空提示，不能编造状态，也不能改用其他来源的数据。
+        """
+        system_prompt = ""
+        system_high_load = False
+
+        battery_threshold = getattr(self, "battery_threshold", 20)
+        if battery_percent is not None and battery_percent < battery_threshold:
+            system_prompt += " 当前设备电量偏低，若建议涉及长时间操作，请顺手提醒保存进度。"
+
+        memory_threshold = getattr(self, "memory_threshold", 80)
+        cpu_high = cpu_percent is not None and cpu_percent > 80
+        memory_high = memory_percent is not None and memory_percent > memory_threshold
+        if cpu_high or memory_high:
+            if system_prompt:
+                system_prompt += " "
+            system_prompt += " 当前系统负载较高，请避免建议用户同时做太重的操作。"
+            system_high_load = True
+            logger.info(
+                f"系统资源使用过高: CPU={cpu_percent}, 内存={memory_percent}"
+            )
+        return system_prompt, system_high_load
+
+    def _get_remote_system_status_prompt(self) -> tuple[str, bool] | None:
+        """远程模式下的系统状态提示：只读客户端随帧上报的统计。
+
+        返回 ``None`` 表示当前没有可信的远程统计（客户端尚未上报、按需路径
+        默认不采样，或字段缺失）。调用方必须把它当作"不产生系统状态提示"，
+        绝不能回落到服务器本机的 psutil 采样——那会把服务器负载说成用户设备
+        状态。本方法只读缓存，不触发截图。
+        """
+        receiver = getattr(self, "_remote_receiver", None)
+        if receiver is None:
+            return None
+        stats = getattr(receiver, "latest_system_stats", None)
+        if not isinstance(stats, dict) or not stats:
+            return None
+        return self._build_system_status_prompt(
+            cpu_percent=self._coerce_stat_percent(stats.get("cpu_percent")),
+            memory_percent=self._coerce_stat_percent(stats.get("memory_percent")),
+            battery_percent=self._coerce_stat_percent(stats.get("battery_percent")),
+        )
+
     def _get_system_status_prompt(self) -> tuple:
-        """获取系统状态提示词。"""
+        """获取系统状态提示词。
+
+        远程模式下使用客户端上报的统计；没有可信数据时不产生提示，也不读取
+        服务器本机负载。本地模式行为与改造前保持一致。
+        """
+        if self._get_runtime_flag("remote_mode"):
+            remote_result = self._get_remote_system_status_prompt()
+            if remote_result is None:
+                return "", False
+            return remote_result
+
         system_prompt = ""
         system_high_load = False
         try:
@@ -5131,19 +5282,13 @@ class ScreenCompanionMediaMixin:
                     battery = psutil.sensors_battery()
                 except Exception as battery_error:
                     logger.debug(f"获取电池状态失败: {battery_error}")
-            battery_threshold = getattr(self, "battery_threshold", 20)
-            if battery and getattr(battery, "percent", None) is not None and battery.percent < battery_threshold:
-                system_prompt += " 当前设备电量偏低，若建议涉及长时间操作，请顺手提醒保存进度。"
+            battery_percent = getattr(battery, "percent", None) if battery else None
 
-            memory_threshold = getattr(self, "memory_threshold", 80)
-            if cpu_percent > 80 or memory_percent > memory_threshold:
-                if system_prompt:
-                    system_prompt += " "
-                system_prompt += " 当前系统负载较高，请避免建议用户同时做太重的操作。"
-                system_high_load = True
-                logger.info(
-                    f"系统资源使用过高: CPU={cpu_percent}%, 内存={memory_percent}%"
-                )
+            return self._build_system_status_prompt(
+                cpu_percent=self._coerce_stat_percent(cpu_percent),
+                memory_percent=self._coerce_stat_percent(memory_percent),
+                battery_percent=self._coerce_stat_percent(battery_percent),
+            )
         except ImportError:
             logger.debug("Debug event")
         except Exception as e:

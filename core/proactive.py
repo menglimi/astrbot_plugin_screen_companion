@@ -107,7 +107,15 @@ class ScreenCompanionProactiveMixin:
         return self.parsed_window_companion_targets
 
     def _list_open_window_titles(self) -> list[str]:
-        """Return de-duplicated open window titles."""
+        """Return de-duplicated open window titles.
+
+        远程模式下这个列表会来自服务器桌面，与用户电脑无关，因此返回空列表：
+        调用方会据此判定为"没有窗口变化"，不会用服务器窗口启动窗口陪伴会话，
+        也不会把服务器窗口写进活动轨迹。
+        """
+        if self._get_runtime_flag("remote_mode"):
+            return []
+
         try:
             import pygetwindow
         except ImportError:

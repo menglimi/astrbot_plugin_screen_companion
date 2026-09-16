@@ -885,16 +885,28 @@ class WebServer:
         background_enabled = bool(background_tracking.get("enabled"))
         background_active = bool(background_tracking.get("active"))
         background_interval = int(background_tracking.get("interval", 15) or 15)
-        background_detail = (
-            f"已启用，当前{'正在采样' if background_active else '等待插件空闲时接管'}，采样间隔 {background_interval} 秒。"
-            if background_enabled
-            else "未启用独立活动轨迹采集。"
-        )
+        background_remote = bool(background_tracking.get("remote_mode"))
+        background_stale = bool(background_tracking.get("remote_frame_stale"))
+        if background_remote:
+            # 远程模式的窗口标题只在识屏时更新，不能沿用本地「采样间隔」的说法。
+            background_detail = (
+                f"已启用。远程模式下活动轨迹随识屏更新，"
+                f"最近一帧{'已过期（暂停计时）' if background_stale else '仍然有效'}，"
+                "时间分辨率低于本机模式。"
+                if background_enabled
+                else "未启用独立活动轨迹采集。"
+            )
+        else:
+            background_detail = (
+                f"已启用，当前{'正在采样' if background_active else '等待插件空闲时接管'}，采样间隔 {background_interval} 秒。"
+                if background_enabled
+                else "未启用独立活动轨迹采集。"
+            )
         add_check(
             self._build_health_check_entry(
                 key="background_tracking",
                 title="独立活动轨迹采集",
-                status="ok",
+                status="warn" if (background_remote and background_stale) else "ok",
                 detail=background_detail,
             )
         )

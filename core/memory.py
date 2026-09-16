@@ -4039,6 +4039,25 @@ class ScreenCompanionMemoryMixin:
         self.activity_start_time = None
         return closed
 
+    def _remote_activity_frame_is_stale(self) -> bool:
+        """远程模式下判断最近一帧是否已过期。
+
+        远程模式的窗口标题只在发生识屏时更新，空闲期间不会刷新。若继续用同一
+        帧反复采样，一次识屏会被记成持续数小时的同一窗口，活动时长严重虚高。
+        因此过期帧不得用于延长活动，必须在采样任务里按「查不到窗口」处理。
+        """
+        receiver = getattr(self, "_remote_receiver", None)
+        if receiver is None:
+            return True
+        max_age = max(5, int(getattr(self, "remote_screenshot_max_age", 60) or 60))
+        try:
+            age = float(getattr(receiver, "latest_age_seconds", float("inf")))
+        except (TypeError, ValueError):
+            return True
+        if age != age:  # NaN
+            return True
+        return age > max_age
+
     def _is_background_activity_tracking_effective(self) -> bool:
         if not bool(getattr(self, "running", False)):
             return False
@@ -4062,10 +4081,16 @@ class ScreenCompanionMemoryMixin:
             5,
             int(getattr(self, "background_activity_tracking_interval", 15) or 15),
         )
+        remote_mode = self._get_runtime_flag("remote_mode")
         return {
             "enabled": bool(getattr(self, "enable_background_activity_tracking", False)),
             "active": self._is_background_activity_tracking_effective(),
             "interval": interval,
+            "remote_mode": remote_mode,
+            # 远程模式下窗口标题只在识屏时更新，过期帧不参与活动记录。
+            "remote_frame_stale": (
+                self._remote_activity_frame_is_stale() if remote_mode else False
+            ),
         }
 
     def _infer_background_activity_scene(self, window_title: str) -> str:
@@ -4119,6 +4144,18 @@ class ScreenCompanionMemoryMixin:
                     only_source="background_tracker",
                 )
                 await asyncio.sleep(min(interval, 5))
+                continue
+
+            if self._get_runtime_flag("remote_mode") and self._remote_activity_frame_is_stale():
+                # 远程帧已过期：窗口标题无法代表当前时刻，按「查不到窗口」处理，
+                # 既不用陈旧帧延长上一条活动，也不去读服务器本机窗口。
+                empty_title_streak += 1
+                if empty_title_streak >= 2:
+                    self._close_current_activity(
+                        min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS,
+                        only_source="background_tracker",
+                    )
+                await asyncio.sleep(interval)
                 continue
 
             try:
@@ -5648,6 +5685,12 @@ class ScreenCompanionMemoryMixin:
 
     def _get_local_browser_history_candidates(self) -> list[tuple[str, str]]:
         import glob
+
+        # 远程模式下用户浏览器在另一台机器上，服务器本地历史与用户无关。
+        # 这里返回空候选，让上层如实报告「没有可用旁证」，而不是拿服务器的
+        # 浏览记录冒充用户行为。
+        if self._get_runtime_flag("remote_mode"):
+            return []
 
         local_appdata = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
         if not local_appdata:

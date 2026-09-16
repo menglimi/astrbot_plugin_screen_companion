@@ -328,6 +328,16 @@ class ScreenCompanionInputStatsMixin:
         if not self.enable_input_stats:
             self._set_input_stats_status("disabled", "本地输入统计未启用")
             return False
+        # 远程模式下用户键鼠在另一台机器上，服务器监听自身输入既无意义，
+        # 又会把服务器操作混进用户数据。客户端上报能力尚未实现，这里明确
+        # 停用并说明原因，不做静默降级。
+        if self._get_runtime_flag("remote_mode"):
+            self._set_input_stats_status(
+                "remote_unsupported",
+                "远程模式下无法统计本机输入：客户端尚未上报输入统计，"
+                "当前不会监听服务器键鼠。",
+            )
+            return False
         if getattr(self, "_input_stats_listeners", None):
             self._set_input_stats_status("running", "本地输入统计正在监听键盘")
             return True
